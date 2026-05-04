@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mongo-style → SQLite</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <h1>Mongo-style → SQLite</h1>
+      <p class="tagline">Generate SQLite from JSON filters, projections, and CRUD-style inputs. Runs locally in your browser.</p>
+    </header>
+
+    <section class="panel global">
+      <h2>Table</h2>
+      <label class="field">
+        <span>Collection / table name</span>
+        <input type="text" id="tableName" value="users" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span>Schema hint (optional, comma-separated columns for projection exclusion)</span>
+        <input type="text" id="schemaHint" placeholder="id, name, email, created_at" autocomplete="off" />
+      </label>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="Operation">
+      <button type="button" class="tab active" data-tab="select" role="tab" aria-selected="true">SELECT</button>
+      <button type="button" class="tab" data-tab="insert" role="tab" aria-selected="false">INSERT</button>
+      <button type="button" class="tab" data-tab="update" role="tab" aria-selected="false">UPDATE</button>
+      <button type="button" class="tab" data-tab="delete" role="tab" aria-selected="false">DELETE</button>
+    </nav>
+
+    <div class="tab-panels">
+      <section id="panel-select" class="tab-panel active" role="tabpanel">
+        <h2>Read (find)</h2>
+        <label class="field">
+          <span>Filter (JSON object)</span>
+          <textarea id="selectFilter" rows="5" spellcheck="false">{"status": "active", "age": {"$gte": 18}}</textarea>
+        </label>
+        <label class="field">
+          <span>Projection (JSON: inclusion <code>{"a": 1}</code>, or array <code>["a","b"]</code>; optional exclusion if schema hint set)</span>
+          <textarea id="selectProjection" rows="3" spellcheck="false">{"name": 1, "email": 1}</textarea>
+        </label>
+        <label class="field">
+          <span>Sort (JSON, 1 = ASC, -1 = DESC)</span>
+          <textarea id="selectSort" rows="2" spellcheck="false">{"created_at": -1}</textarea>
+        </label>
+        <div class="row">
+          <label class="field inline">
+            <span>Limit</span>
+            <input type="number" id="selectLimit" min="0" placeholder="none" />
+          </label>
+          <label class="field inline">
+            <span>Skip / offset</span>
+            <input type="number" id="selectSkip" min="0" placeholder="0" />
+          </label>
+        </div>
+      </section>
+
+      <section id="panel-insert" class="tab-panel" role="tabpanel" hidden>
+        <h2>Insert</h2>
+        <label class="field">
+          <span>Documents (JSON object or array of objects)</span>
+          <textarea id="insertDocs" rows="8" spellcheck="false">[{"name": "Ada", "score": 10}, {"name": "Bob", "score": 7}]</textarea>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="insertInferColumns" checked />
+          <span>Infer columns from first document</span>
+        </label>
+      </section>
+
+      <section id="panel-update" class="tab-panel" role="tabpanel" hidden>
+        <h2>Update</h2>
+        <label class="field">
+          <span>Filter (JSON object)</span>
+          <textarea id="updateFilter" rows="4" spellcheck="false">{"_id": 1}</textarea>
+        </label>
+        <label class="field">
+          <span>Update (JSON: <code>$set</code>, <code>$unset</code>, or replacement object)</span>
+          <textarea id="updateBody" rows="5" spellcheck="false">{"$set": {"status": "archived"}, "$unset": {"temp": ""}}</textarea>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="updateAllowEmptyFilter" />
+          <span>Allow empty filter (updates all rows)</span>
+        </label>
+      </section>
+
+      <section id="panel-delete" class="tab-panel" role="tabpanel" hidden>
+        <h2>Delete</h2>
+        <label class="field">
+          <span>Filter (JSON object)</span>
+          <textarea id="deleteFilter" rows="4" spellcheck="false">{"status": "deleted"}</textarea>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="deleteAllowEmptyFilter" />
+          <span>Allow empty filter (deletes all rows)</span>
+        </label>
+      </section>
+    </div>
+
+    <section class="panel actions">
+      <button type="button" class="btn primary" id="btnGenerate">Generate SQL</button>
+      <button type="button" class="btn" id="btnCopy">Copy</button>
+      <button type="button" class="btn" id="btnDownload">Download .sql</button>
+    </section>
+
+    <section class="panel output">
+      <h2>Output</h2>
+      <p id="message" class="message" role="status"></p>
+      <pre id="sqlOut" class="sql-out" tabindex="0"></pre>
+    </section>
+
+    <section class="panel limitations">
+      <h2>Limitations</h2>
+      <ul>
+        <li>No aggregation pipeline (<code>$group</code>, <code>$lookup</code>, etc.).</li>
+        <li>Flat documents preferred; nested objects in filters/inserts are skipped or stringified with a warning.</li>
+        <li>Dotted field names are emitted as double-quoted SQLite identifiers (one column per path).</li>
+        <li><code>$regex</code> is approximated with <code>LIKE</code> for simple patterns; PCRE features are not supported.</li>
+        <li>Projection exclusion requires the optional schema hint column list.</li>
+        <li>UPDATE/DELETE with an empty filter are blocked unless the checkbox is checked.</li>
+      </ul>
+    </section>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

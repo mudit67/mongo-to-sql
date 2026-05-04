@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>mongoToSqlite tests</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 1rem; background: #111; color: #eee; }
+    .fail { color: #f66; }
+    .ok { color: #6c6; }
+  </style>
+</head>
+<body>
+  <h1>mongoToSqlite.js tests</h1>
+  <p>Open this file via a local HTTP server (ES modules), e.g. <code>python3 -m http.server</code>, then check the console.</p>
+  <pre id="out"></pre>
+  <script type="module">
+    import {
+      quoteIdentifier,
+      escapeSqlString,
+      filterToWhere,
+      projectionToSelect,
+      sortToOrderBy,
+      buildSelect,
+      buildInsert,
+      buildUpdate,
+      buildDelete,
+      parseSchemaHint,
+    } from "./mongoToSqlite.js";
+
+    const out = document.getElementById("out");
+    const lines = [];
+
+    function assert(cond, msg) {
+      if (!cond) {
+        console.error("FAIL:", msg);
+        lines.push("FAIL: " + msg);
+        throw new Error(msg);
+      }
+      lines.push("ok: " + msg);
+    }
+
+    try {
+      assert(quoteIdentifier("users") === "users", "safe ident");
+      assert(quoteIdentifier("a.b") === '"a.b"', "dotted ident");
+
+      assert(escapeSqlString("O'Brien") === "'O''Brien'", "sql string escape");
+
+      let w = [];
+      assert(filterToWhere({ age: { $gte: 18 } }, w).includes(">="), "operator");
+      w = [];
+      assert(filterToWhere({ $or: [{ a: 1 }, { b: 2 }] }, w).includes("OR"), "$or");
+
+      w = [];
+      assert(projectionToSelect({ a: 1, b: 1 }, null, w) === "a, b", "projection");
+
+      w = [];
+      assert(
+        projectionToSelect({ a: 0 }, parseSchemaHint("a,b,c"), w) === "b, c",
+        "projection exclusion"
+      );
+
+      w = [];
+      assert(sortToOrderBy({ x: -1, y: 1 }, w).includes("DESC"), "sort");
+
+      const sel = buildSelect({
+        table: "t",
+        filter: '{"x":1}',
+        projection: "",
+        sort: "",
+        limit: "",
+        skip: "",
+        schemaHint: null,
+      });
+      assert(!sel.error && sel.sql.startsWith("SELECT * FROM"), "buildSelect");
+
+      const ins = buildInsert({
+        table: "t",
+        docs: '[{"a":1}]',
+        inferColumns: true,
+      });
+      assert(!ins.error && ins.sql.includes("INSERT INTO"), "buildInsert");
+
+      const updErr = buildUpdate({
+        table: "t",
+        filter: "{}",
+        update: '{"$set":{"x":1}}',
+        allowEmptyFilter: false,
+      });
+      assert(!!updErr.error, "update blocks empty filter");
+
+      const delOk = buildDelete({
+        table: "t",
+        filter: "{}",
+        allowEmptyFilter: true,
+      });
+      assert(!delOk.error && delOk.sql.includes("DELETE FROM"), "delete allow empty");
+
+      lines.unshift("All assertions passed.");
+      out.textContent = lines.join("\n");
+      out.className = "ok";
+      console.log(lines.join("\n"));
+    } catch (e) {
+      out.textContent = lines.join("\n") + "\n\n" + String(/** @type {Error} */ (e).stack || e);
+      out.className = "fail";
+    }
+  </script>
+</body>
+</html>
