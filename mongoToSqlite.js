@@ -76,10 +76,11 @@ function isOperatorObject(spec) {
  * @param {string} field
  * @param {unknown} value
  * @param {string[]} warnings
+ * @param {string | null} [tableAlias] safe SQL alias (e.g. base, j1); unquoted
  * @returns {string}
  */
-function compileFieldCondition(field, value, warnings) {
-  const col = quoteIdentifier(field);
+function compileFieldCondition(field, value, warnings, tableAlias = null) {
+  const col = tableAlias ? `${tableAlias}.${quoteIdentifier(field)}` : quoteIdentifier(field);
 
   if (value === null) return `${col} IS NULL`;
 
@@ -154,7 +155,7 @@ function compileFieldCondition(field, value, warnings) {
       case "$options":
         break;
       case "$not": {
-        const inner = compileFieldCondition(field, arg, warnings);
+        const inner = compileFieldCondition(field, arg, warnings, tableAlias);
         parts.push(`NOT (${inner})`);
         break;
       }
@@ -188,9 +189,10 @@ function regexToLike(pattern, options, warnings) {
 /**
  * @param {Record<string, unknown>} filter
  * @param {string[]} warnings
+ * @param {string | null} [tableAlias] qualify top-level field refs (e.g. base)
  * @returns {string}
  */
-export function filterToWhere(filter, warnings) {
+export function filterToWhere(filter, warnings, tableAlias = null) {
   if (filter === null || typeof filter === "undefined") {
     warnings.push("Filter was null/undefined; using TRUE.");
     return "1";
@@ -210,7 +212,7 @@ export function filterToWhere(filter, warnings) {
         parts.push("1");
         continue;
       }
-      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings)})`);
+      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`);
       parts.push(`(${subs.join(" AND ")})`);
       continue;
     }
@@ -221,7 +223,7 @@ export function filterToWhere(filter, warnings) {
         parts.push("0");
         continue;
       }
-      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings)})`);
+      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`);
       parts.push(`(${subs.join(" OR ")})`);
       continue;
     }
@@ -231,15 +233,15 @@ export function filterToWhere(filter, warnings) {
         parts.push("1");
         continue;
       }
-      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings)})`);
+      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`);
       parts.push(`NOT (${subs.join(" OR ")})`);
       continue;
     }
     if (key === "$not") {
-      parts.push(`NOT (${filterToWhere(/** @type {Record<string, unknown>} */ (filter.$not), warnings)})`);
+      parts.push(`NOT (${filterToWhere(/** @type {Record<string, unknown>} */ (filter.$not), warnings, tableAlias)})`);
       continue;
     }
-    parts.push(compileFieldCondition(key, filter[key], warnings));
+    parts.push(compileFieldCondition(key, filter[key], warnings, tableAlias));
   }
   if (parts.length === 0) return "1";
   return parts.join(" AND ");
@@ -414,7 +416,7 @@ function parseJsonInput(input, label) {
  * @param {string[]} warnings
  * @returns {string}
  */
-function normalizeTable(name, warnings) {
+export function normalizeTable(name, warnings) {
   if (typeof name !== "string" || !name.trim()) return "";
   const t = name.trim();
   if (/[\s;'"\\]/.test(t)) {

@@ -26,6 +26,7 @@
       buildDelete,
       parseSchemaHint,
     } from "./mongoToSqlite.js";
+    import { buildAggregate } from "./pipelineToSqlite.js";
 
     const out = document.getElementById("out");
     const lines = [];
@@ -49,6 +50,9 @@
       assert(filterToWhere({ age: { $gte: 18 } }, w).includes(">="), "operator");
       w = [];
       assert(filterToWhere({ $or: [{ a: 1 }, { b: 2 }] }, w).includes("OR"), "$or");
+
+      w = [];
+      assert(filterToWhere({ x: 1 }, w, "base").includes("base.x"), "filter alias");
 
       w = [];
       assert(projectionToSelect({ a: 1, b: 1 }, null, w) === "a, b", "projection");
@@ -94,6 +98,35 @@
         allowEmptyFilter: true,
       });
       assert(!delOk.error && delOk.sql.includes("DELETE FROM"), "delete allow empty");
+
+      const agg = buildAggregate({
+        table: "users",
+        pipeline: JSON.stringify([
+          { $match: { status: "active" } },
+          { $group: { _id: "$region", total: { $sum: "$amount" }, n: { $sum: 1 } } },
+          { $sort: { total: -1 } },
+          { $limit: 10 },
+        ]),
+      });
+      assert(!agg.error && agg.sql.includes("GROUP BY") && agg.sql.includes("SUM"), "buildAggregate group");
+
+      const join = buildAggregate({
+        table: "users",
+        pipeline: JSON.stringify([
+          { $match: { id: 1 } },
+          { $lookup: { from: "orders", localField: "id", foreignField: "user_id" } },
+        ]),
+      });
+      assert(!join.error && join.sql.includes("LEFT JOIN"), "buildAggregate lookup");
+
+      const bad = buildAggregate({
+        table: "users",
+        pipeline: JSON.stringify([
+          { $lookup: { from: "o", localField: "a", foreignField: "b" } },
+          { $match: { x: 1 } },
+        ]),
+      });
+      assert(!!bad.error, "reject match after lookup");
 
       lines.unshift("All assertions passed.");
       out.textContent = lines.join("\n");

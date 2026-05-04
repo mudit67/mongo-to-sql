@@ -30,6 +30,7 @@
       <button type="button" class="tab" data-tab="insert" role="tab" aria-selected="false">INSERT</button>
       <button type="button" class="tab" data-tab="update" role="tab" aria-selected="false">UPDATE</button>
       <button type="button" class="tab" data-tab="delete" role="tab" aria-selected="false">DELETE</button>
+      <button type="button" class="tab" data-tab="aggregate" role="tab" aria-selected="false">AGGREGATE</button>
     </nav>
 
     <div class="tab-panels">
@@ -98,6 +99,24 @@
           <span>Allow empty filter (deletes all rows)</span>
         </label>
       </section>
+
+      <section id="panel-aggregate" class="tab-panel" role="tabpanel" hidden>
+        <h2>Limited aggregation pipeline</h2>
+        <p class="field-hint">JSON array of stages. Supported: <code>$match</code> (only before <code>$lookup</code>), at most one equality <code>$lookup</code>, optional <code>$group</code> (<code>$sum</code>, <code>$avg</code>, <code>$min</code>, <code>$max</code>, <code>$sum: 1</code> / <code>$count: {}</code>), then optional <code>$sort</code> / <code>$limit</code> / <code>$skip</code>.</p>
+        <label class="field">
+          <span>Pipeline (JSON array)</span>
+          <textarea id="aggregatePipeline" rows="14" spellcheck="false">[
+  { "$match": { "status": "active" } },
+  { "$group": {
+      "_id": "$region",
+      "total": { "$sum": "$amount" },
+      "n": { "$sum": 1 }
+  }},
+  { "$sort": { "total": -1 } },
+  { "$limit": 10 }
+]</textarea>
+        </label>
+      </section>
     </div>
 
     <section class="panel actions">
@@ -115,7 +134,8 @@
     <section class="panel limitations">
       <h2>Limitations</h2>
       <ul>
-        <li>No aggregation pipeline (<code>$group</code>, <code>$lookup</code>, etc.).</li>
+        <li><strong>Aggregate tab:</strong> only <code>$match</code>, one equality <code>$lookup</code>, <code>$group</code>, <code>$sort</code>, <code>$limit</code>, <code>$skip</code>. No <code>$match</code> after <code>$lookup</code>. <code>$lookup</code> compiles to <code>LEFT JOIN</code> (duplicate left rows when multiple right rows match).</li>
+        <li>With <code>$lookup</code>, <code>$group._id</code> paths use the <strong>left</strong> table; accumulators like <code>$sum</code> use the <strong>joined</strong> (<code>j1</code>) table.</li>
         <li>Flat documents preferred; nested objects in filters/inserts are skipped or stringified with a warning.</li>
         <li>Dotted field names are emitted as double-quoted SQLite identifiers (one column per path).</li>
         <li><code>$regex</code> is approximated with <code>LIKE</code> for simple patterns; PCRE features are not supported.</li>

@@ -4,6 +4,7 @@ import {
   buildUpdate,
   buildDelete,
 } from "./mongoToSqlite.js";
+import { buildAggregate } from "./pipelineToSqlite.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,6 +17,7 @@ const els = {
     insert: $("panel-insert"),
     update: $("panel-update"),
     delete: $("panel-delete"),
+    aggregate: $("panel-aggregate"),
   },
   selectFilter: $("selectFilter"),
   selectProjection: $("selectProjection"),
@@ -29,6 +31,7 @@ const els = {
   updateAllowEmptyFilter: $("updateAllowEmptyFilter"),
   deleteFilter: $("deleteFilter"),
   deleteAllowEmptyFilter: $("deleteAllowEmptyFilter"),
+  aggregatePipeline: $("aggregatePipeline"),
   btnGenerate: $("btnGenerate"),
   btnCopy: $("btnCopy"),
   btnDownload: $("btnDownload"),
@@ -36,7 +39,7 @@ const els = {
   sqlOut: $("sqlOut"),
 };
 
-/** @type {"select"|"insert"|"update"|"delete"} */
+/** @type {"select"|"insert"|"update"|"delete"|"aggregate"} */
 let activeTab = "select";
 
 function setTab(name) {
@@ -55,7 +58,7 @@ function setTab(name) {
 
 els.tabs.forEach((btn) => {
   btn.addEventListener("click", () => {
-    const t = /** @type {"select"|"insert"|"update"|"delete"} */ (btn.dataset.tab);
+    const t = /** @type {"select"|"insert"|"update"|"delete"|"aggregate"} */ (btn.dataset.tab);
     if (t) setTab(t);
   });
 });
@@ -103,11 +106,16 @@ function generate() {
         update: els.updateBody.value,
         allowEmptyFilter: els.updateAllowEmptyFilter.checked,
       });
-    } else {
+    } else if (op === "delete") {
       result = buildDelete({
         table,
         filter: els.deleteFilter.value,
         allowEmptyFilter: els.deleteAllowEmptyFilter.checked,
+      });
+    } else {
+      result = buildAggregate({
+        table,
+        pipeline: els.aggregatePipeline.value,
       });
     }
   } catch (e) {

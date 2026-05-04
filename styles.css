@@ -45,6 +45,19 @@ body {
   font-size: 0.95rem;
 }
 
+.field-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.field-hint code {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  color: var(--accent);
+}
+
 .panel {
   margin-top: 1.25rem;
   padding: 1rem 1.1rem;
