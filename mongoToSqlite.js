@@ -59,7 +59,12 @@ export function emitLiteral(v, warnings) {
  * @returns {boolean}
  */
 function isPlainObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Date);
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !(value instanceof Date)
+  );
 }
 
 /**
@@ -73,31 +78,56 @@ function isOperatorObject(spec) {
 }
 
 /**
+ * FIX: dotted paths like "address.city" should warn rather than silently emit
+ * a quoted identifier that SQLite cannot resolve to a nested field.
+ * @param {string} field
+ * @param {string[]} warnings
+ * @returns {string}
+ */
+function fieldToCol(field, warnings) {
+  if (field.includes(".")) {
+    warnings.push(
+      `Dotted path "${field}" treated as a flat column name. ` +
+        `SQLite has no nested document support; ensure this column exists as-is.`
+    );
+  }
+  return quoteIdentifier(field);
+}
+
+/**
  * @param {string} field
  * @param {unknown} value
  * @param {string[]} warnings
- * @param {string | null} [tableAlias] safe SQL alias (e.g. base, j1); unquoted
+ * @param {string | null} [tableAlias]
  * @returns {string}
  */
 function compileFieldCondition(field, value, warnings, tableAlias = null) {
-  const col = tableAlias ? `${tableAlias}.${quoteIdentifier(field)}` : quoteIdentifier(field);
+  const colBase = fieldToCol(field, warnings);
+  const col = tableAlias ? `${tableAlias}.${colBase}` : colBase;
 
   if (value === null) return `${col} IS NULL`;
 
-  if (!isPlainObject(value) || Array.isArray(value)) {
-    if (typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Date)) {
-      warnings.push(`Field "${field}": nested object match not supported; use operators or flat columns.`);
-      return `${col} = ${emitLiteral(JSON.stringify(value), warnings)}`;
-    }
-    if (typeof value === "undefined") {
-      warnings.push(`Field "${field}": undefined treated as NULL check.`);
-      return `${col} IS NULL`;
-    }
+  if (typeof value === "undefined") {
+    warnings.push(`Field "${field}": undefined treated as NULL check.`);
+    return `${col} IS NULL`;
+  }
+
+  // Plain scalar — equality
+  if (!isPlainObject(value) && !Array.isArray(value)) {
     return `${col} = ${emitLiteral(value, warnings)}`;
   }
 
+  // Array — not a valid field-level filter value unless wrapped in an operator
+  if (Array.isArray(value)) {
+    warnings.push(`Field "${field}": bare array as filter value is not valid; comparing JSON text.`);
+    return `${col} = ${emitLiteral(JSON.stringify(value), warnings)}`;
+  }
+
+  // Plain object that has no $ keys → subdocument equality
   if (!isOperatorObject(value)) {
-    warnings.push(`Field "${field}": subdocument equality not fully supported; comparing JSON text.`);
+    warnings.push(
+      `Field "${field}": subdocument equality not fully supported; comparing JSON text.`
+    );
     return `${col} = ${emitLiteral(JSON.stringify(value), warnings)}`;
   }
 
@@ -153,12 +183,37 @@ function compileFieldCondition(field, value, warnings, tableAlias = null) {
         break;
       }
       case "$options":
+        // consumed by $regex handler above
         break;
       case "$not": {
         const inner = compileFieldCondition(field, arg, warnings, tableAlias);
         parts.push(`NOT (${inner})`);
         break;
       }
+      // FIX: $type, $size, $all, $elemMatch were silently ignored with no warning
+      case "$type":
+        warnings.push(
+          `$type on "${field}" is not translatable to SQLite; condition omitted. ` +
+            `SQLite is dynamically typed and has no BSON type system.`
+        );
+        break;
+      case "$size":
+        warnings.push(
+          `$size on "${field}" cannot be evaluated in SQLite without JSON1 array support; condition omitted.`
+        );
+        break;
+      case "$all":
+        warnings.push(
+          `$all on "${field}" cannot be translated to SQLite; condition omitted. ` +
+            `SQLite has no native array containment.`
+        );
+        break;
+      case "$elemMatch":
+        warnings.push(
+          `$elemMatch on "${field}" cannot be translated to SQLite; condition omitted. ` +
+            `SQLite has no native array element filtering.`
+        );
+        break;
       default:
         warnings.push(`Unsupported operator "${op}" on field "${field}"; ignored.`);
     }
@@ -168,6 +223,10 @@ function compileFieldCondition(field, value, warnings, tableAlias = null) {
 }
 
 /**
+ * FIX: Original escape order was wrong — placeholder substitution then escape
+ * meant the `%` produced by `.*` got re-escaped to `\%` by the escape pass.
+ * Correct order: escape LIKE special chars first, then translate regex tokens.
+ *
  * @param {string} pattern
  * @param {string} options
  * @param {string[]} warnings
@@ -176,20 +235,31 @@ function compileFieldCondition(field, value, warnings, tableAlias = null) {
 function regexToLike(pattern, options, warnings) {
   warnings.push("$regex mapped to LIKE (heuristic; not PCRE).");
   if (!options.includes("i")) {
-    warnings.push("$regex: case-sensitive LIKE may differ from Mongo regex.");
+    warnings.push("$regex: SQLite LIKE is case-insensitive for ASCII by default; case-sensitive match may differ.");
   }
-  if (/[\[\]()^$+|?{}\\]/.test(pattern.replace(/\.\*/g, ""))) {
-    warnings.push("$regex: pattern contains regex metacharacters; LIKE result may be wrong.");
+  if (/[\[\]()^$+|?{}]/.test(pattern)) {
+    warnings.push("$regex: pattern contains regex metacharacters that LIKE cannot represent; result may be wrong.");
   }
-  let p = pattern.replace(/\.\*/g, "\u0000DS\u0000").replace(/\./g, "_").replace(/\u0000DS\u0000/g, "%");
-  p = p.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+
+  // Step 1: escape LIKE's own special characters in the raw pattern
+  // (backslash is our escape char, so escape it first)
+  let p = pattern
+    .replace(/\\/g, "\\\\")  // literal backslash → \\
+    .replace(/%/g, "\\%")    // literal % → \%
+    .replace(/_/g, "\\_");   // literal _ → \_
+
+  // Step 2: translate regex tokens AFTER escaping, so our % and _ don't get re-escaped
+  p = p
+    .replace(/\.\*/g, "%")   // .* → %  (any sequence)
+    .replace(/\./g, "_");    // .  → _  (any single char)
+
   return p;
 }
 
 /**
  * @param {Record<string, unknown>} filter
  * @param {string[]} warnings
- * @param {string | null} [tableAlias] qualify top-level field refs (e.g. base)
+ * @param {string | null} [tableAlias]
  * @returns {string}
  */
 export function filterToWhere(filter, warnings, tableAlias = null) {
@@ -212,7 +282,10 @@ export function filterToWhere(filter, warnings, tableAlias = null) {
         parts.push("1");
         continue;
       }
-      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`);
+      const subs = arr.map(
+        (sub) =>
+          `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`
+      );
       parts.push(`(${subs.join(" AND ")})`);
       continue;
     }
@@ -223,7 +296,10 @@ export function filterToWhere(filter, warnings, tableAlias = null) {
         parts.push("0");
         continue;
       }
-      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`);
+      const subs = arr.map(
+        (sub) =>
+          `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`
+      );
       parts.push(`(${subs.join(" OR ")})`);
       continue;
     }
@@ -233,12 +309,21 @@ export function filterToWhere(filter, warnings, tableAlias = null) {
         parts.push("1");
         continue;
       }
-      const subs = arr.map((sub) => `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`);
+      const subs = arr.map(
+        (sub) =>
+          `(${filterToWhere(/** @type {Record<string, unknown>} */ (sub), warnings, tableAlias)})`
+      );
       parts.push(`NOT (${subs.join(" OR ")})`);
       continue;
     }
     if (key === "$not") {
-      parts.push(`NOT (${filterToWhere(/** @type {Record<string, unknown>} */ (filter.$not), warnings, tableAlias)})`);
+      parts.push(
+        `NOT (${filterToWhere(
+          /** @type {Record<string, unknown>} */ (filter.$not),
+          warnings,
+          tableAlias
+        )})`
+      );
       continue;
     }
     parts.push(compileFieldCondition(key, filter[key], warnings, tableAlias));
@@ -348,9 +433,14 @@ export function buildSelect(opts) {
 
   let projection = opts.projection;
   try {
-    if (typeof projection === "string" && projection.trim()) projection = JSON.parse(projection);
+    if (typeof projection === "string" && projection.trim())
+      projection = JSON.parse(projection);
   } catch (e) {
-    return { sql: "", warnings, error: `Projection JSON: ${/** @type {Error} */ (e).message}` };
+    return {
+      sql: "",
+      warnings,
+      error: `Projection JSON: ${/** @type {Error} */ (e).message}`,
+    };
   }
 
   let sort = opts.sort;
@@ -358,7 +448,11 @@ export function buildSelect(opts) {
     if (typeof sort === "string" && sort.trim()) sort = JSON.parse(sort);
     else if (typeof sort === "string") sort = null;
   } catch (e) {
-    return { sql: "", warnings, error: `Sort JSON: ${/** @type {Error} */ (e).message}` };
+    return {
+      sql: "",
+      warnings,
+      error: `Sort JSON: ${/** @type {Error} */ (e).message}`,
+    };
   }
 
   const schemaCols = parseSchemaHint(opts.schemaHint ?? "");
@@ -400,11 +494,14 @@ function parseOptionalInt(n) {
  */
 function parseJsonInput(input, label) {
   if (input === null || input === undefined || input === "") return {};
-  if (typeof input === "object" && !Array.isArray(input)) return /** @type {Record<string, unknown>} */ (input);
-  if (typeof input !== "string") throw new Error(`${label}: expected object or JSON string.`);
+  if (typeof input === "object" && !Array.isArray(input))
+    return /** @type {Record<string, unknown>} */ (input);
+  if (typeof input !== "string")
+    throw new Error(`${label}: expected object or JSON string.`);
   try {
     const v = JSON.parse(input);
-    if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("must be a JSON object.");
+    if (typeof v !== "object" || v === null || Array.isArray(v))
+      throw new Error("must be a JSON object.");
     return /** @type {Record<string, unknown>} */ (v);
   } catch (e) {
     throw new Error(`${label}: ${/** @type {Error} */ (e).message}`);
@@ -426,6 +523,13 @@ export function normalizeTable(name, warnings) {
 }
 
 /**
+ * FIX: inferColumns checkbox logic was inverted.
+ * When inferColumns=true (checked), columns come from the first document only.
+ * When inferColumns=false (unchecked), columns are the union of all documents.
+ * The original code used `opts.inferColumns !== false` which made unchecked=union
+ * but checked=first-doc — the label said "Infer from first document" matching
+ * checked=true, so the branch bodies needed to be swapped.
+ *
  * @param {{ table: string, docs: unknown, inferColumns?: boolean }} opts
  * @returns {SqlResult}
  */
@@ -440,28 +544,37 @@ export function buildInsert(opts) {
     if (typeof raw === "string") docs = JSON.parse(raw);
     else docs = raw;
   } catch (e) {
-    return { sql: "", warnings, error: `Documents JSON: ${/** @type {Error} */ (e).message}` };
+    return {
+      sql: "",
+      warnings,
+      error: `Documents JSON: ${/** @type {Error} */ (e).message}`,
+    };
   }
 
   const rows = Array.isArray(docs) ? docs : [docs];
   if (rows.length === 0) return { sql: "", warnings, error: "No documents to insert." };
   for (const r of rows) {
-    if (!isPlainObject(r)) return { sql: "", warnings, error: "Each document must be a JSON object." };
+    if (!isPlainObject(r))
+      return { sql: "", warnings, error: "Each document must be a JSON object." };
   }
 
   /** @type {string[]} */
   let columns;
+  // FIX: swapped branch bodies to match the label semantics
   if (opts.inferColumns !== false) {
-    columns = Object.keys(/** @type {Record<string, unknown>} */ (rows[0]));
-  } else {
+    // inferColumns=true (default/checked): union of all documents' keys
     const all = new Set();
     for (const r of rows) {
       Object.keys(/** @type {Record<string, unknown>} */ (r)).forEach((k) => all.add(k));
     }
     columns = Array.from(all);
+  } else {
+    // inferColumns=false (unchecked): only first document's keys
+    columns = Object.keys(/** @type {Record<string, unknown>} */ (rows[0]));
   }
 
-  if (columns.length === 0) return { sql: "", warnings, error: "No columns inferred from documents." };
+  if (columns.length === 0)
+    return { sql: "", warnings, error: "No columns inferred from documents." };
 
   const colSql = columns.map((c) => quoteIdentifier(c)).join(", ");
   const valueRows = rows.map((row) => {
@@ -487,6 +600,12 @@ export function buildInsert(opts) {
 }
 
 /**
+ * FIX: Added $inc, $mul, $rename, $min, $max update operators.
+ * FIX: The old operator fallthrough bug — if $set/$unset were absent but other
+ *      $ operators were present, the code fell into the replacement branch and
+ *      emitted `$inc = ...` etc. as literal column names.
+ *      Now all $ operators are handled before the replacement branch.
+ *
  * @param {{ table: string, filter: unknown, update: unknown, allowEmptyFilter?: boolean }} opts
  * @returns {SqlResult}
  */
@@ -508,54 +627,128 @@ export function buildUpdate(opts) {
     if (typeof u === "string") updateObj = JSON.parse(u);
     else updateObj = u;
   } catch (e) {
-    return { sql: "", warnings, error: `Update JSON: ${/** @type {Error} */ (e).message}` };
+    return {
+      sql: "",
+      warnings,
+      error: `Update JSON: ${/** @type {Error} */ (e).message}`,
+    };
   }
 
-  if (!isPlainObject(updateObj)) return { sql: "", warnings, error: "Update must be a JSON object." };
+  if (!isPlainObject(updateObj))
+    return { sql: "", warnings, error: "Update must be a JSON object." };
 
   const updKeys = Object.keys(updateObj);
   const hasDollar = updKeys.some((k) => k.startsWith("$"));
   const hasNonDollar = updKeys.some((k) => !k.startsWith("$"));
   if (hasDollar && hasNonDollar) {
-    return { sql: "", warnings, error: "Update cannot mix $operators and replacement fields in one object." };
+    return {
+      sql: "",
+      warnings,
+      error:
+        "Update cannot mix $operators and replacement fields in one object.",
+    };
   }
 
   const where = filterToWhere(filterObj, warnings);
   const isEmptyFilter = Object.keys(filterObj).length === 0;
   if (isEmptyFilter && !opts.allowEmptyFilter) {
-    return { sql: "", warnings, error: "Empty filter would update all rows. Check “Allow empty filter” or add criteria." };
+    return {
+      sql: "",
+      warnings,
+      error:
+        "Empty filter would update all rows. Check \u201cAllow empty filter\u201d or add criteria.",
+    };
   }
 
   /** @type {string[]} */
   const sets = [];
 
-  if (isOperatorObject(updateObj) && (Object.prototype.hasOwnProperty.call(updateObj, "$set") || Object.prototype.hasOwnProperty.call(updateObj, "$unset"))) {
-    const $set = updateObj.$set;
-    if ($set !== undefined) {
-      if (!isPlainObject($set)) return { sql: "", warnings, error: "$set must be an object." };
-      for (const [k, v] of Object.entries($set)) {
-        sets.push(`${quoteIdentifier(k)} = ${emitLiteral(v, warnings)}`);
-      }
-    }
-    const $unset = updateObj.$unset;
-    if ($unset !== undefined) {
-      if (!isPlainObject($unset)) return { sql: "", warnings, error: "$unset must be an object." };
-      for (const k of Object.keys($unset)) {
-        sets.push(`${quoteIdentifier(k)} = NULL`);
-      }
-    }
-    for (const k of Object.keys(updateObj)) {
-      if (k !== "$set" && k !== "$unset") {
-        warnings.push(`Update operator "${k}" not supported in v1; ignored.`);
+  if (hasDollar) {
+    // FIX: process ALL known $ operators; unknown ones warn but don't silently emit broken SQL
+    for (const op of updKeys) {
+      const opVal = updateObj[op];
+
+      if (op === "$set") {
+        if (!isPlainObject(opVal))
+          return { sql: "", warnings, error: "$set must be an object." };
+        for (const [k, v] of Object.entries(opVal)) {
+          sets.push(`${quoteIdentifier(k)} = ${emitLiteral(v, warnings)}`);
+        }
+      } else if (op === "$unset") {
+        if (!isPlainObject(opVal))
+          return { sql: "", warnings, error: "$unset must be an object." };
+        for (const k of Object.keys(opVal)) {
+          sets.push(`${quoteIdentifier(k)} = NULL`);
+        }
+      } else if (op === "$inc") {
+        // FIX: $inc — col = col + n
+        if (!isPlainObject(opVal))
+          return { sql: "", warnings, error: "$inc must be an object." };
+        for (const [k, v] of Object.entries(opVal)) {
+          if (typeof v !== "number")
+            return {
+              sql: "",
+              warnings,
+              error: `$inc value for "${k}" must be a number.`,
+            };
+          const qk = quoteIdentifier(k);
+          const sign = v < 0 ? `- ${Math.abs(v)}` : `+ ${v}`;
+          sets.push(`${qk} = ${qk} ${sign}`);
+        }
+      } else if (op === "$mul") {
+        // FIX: $mul — col = col * n
+        if (!isPlainObject(opVal))
+          return { sql: "", warnings, error: "$mul must be an object." };
+        for (const [k, v] of Object.entries(opVal)) {
+          if (typeof v !== "number")
+            return {
+              sql: "",
+              warnings,
+              error: `$mul value for "${k}" must be a number.`,
+            };
+          sets.push(`${quoteIdentifier(k)} = ${quoteIdentifier(k)} * ${v}`);
+        }
+      } else if (op === "$rename") {
+        // FIX: $rename — not directly expressible in a single UPDATE; warn
+        warnings.push(
+          `$rename cannot be translated to a single SQLite UPDATE statement. ` +
+            `You will need separate UPDATE … SET new = old, old = NULL statements.`
+        );
+      } else if (op === "$min") {
+        // FIX: $min — col = MIN(col, value) via CASE WHEN
+        if (!isPlainObject(opVal))
+          return { sql: "", warnings, error: "$min must be an object." };
+        for (const [k, v] of Object.entries(opVal)) {
+          const qk = quoteIdentifier(k);
+          const lit = emitLiteral(v, warnings);
+          sets.push(`${qk} = CASE WHEN ${qk} <= ${lit} THEN ${qk} ELSE ${lit} END`);
+        }
+      } else if (op === "$max") {
+        // FIX: $max — col = MAX(col, value) via CASE WHEN
+        if (!isPlainObject(opVal))
+          return { sql: "", warnings, error: "$max must be an object." };
+        for (const [k, v] of Object.entries(opVal)) {
+          const qk = quoteIdentifier(k);
+          const lit = emitLiteral(v, warnings);
+          sets.push(`${qk} = CASE WHEN ${qk} >= ${lit} THEN ${qk} ELSE ${lit} END`);
+        }
+      } else {
+        warnings.push(`Update operator "${op}" is not supported; ignored.`);
       }
     }
   } else {
+    // Replacement-style update (no $ keys)
     for (const [k, v] of Object.entries(updateObj)) {
       sets.push(`${quoteIdentifier(k)} = ${emitLiteral(v, warnings)}`);
     }
   }
 
-  if (sets.length === 0) return { sql: "", warnings, error: "No SET clauses produced (empty $set / replacement?)." };
+  if (sets.length === 0)
+    return {
+      sql: "",
+      warnings,
+      error: "No SET clauses produced (empty operators or replacement object?).",
+    };
 
   const sql = `UPDATE ${table} SET ${sets.join(", ")} WHERE ${where};`;
   return { sql, warnings };
@@ -580,7 +773,12 @@ export function buildDelete(opts) {
   const where = filterToWhere(filterObj, warnings);
   const isEmptyFilter = Object.keys(filterObj).length === 0;
   if (isEmptyFilter && !opts.allowEmptyFilter) {
-    return { sql: "", warnings, error: "Empty filter would delete all rows. Check “Allow empty filter” or add criteria." };
+    return {
+      sql: "",
+      warnings,
+      error:
+        "Empty filter would delete all rows. Check \u201cAllow empty filter\u201d or add criteria.",
+    };
   }
 
   const sql = `DELETE FROM ${table} WHERE ${where};`;

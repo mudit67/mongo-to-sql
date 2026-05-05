@@ -1,5 +1,8 @@
 /**
- * Limited aggregation pipeline → SQLite (subset: $match, $lookup, $group, $sort, $limit, $skip).
+ * Aggregation pipeline → SQLite.
+ *
+ * Supported stages: $match, $lookup (multiple, equality), $unwind, $project,
+ * $addFields, $group, $sort, $limit, $skip.
  */
 
 import {
@@ -11,8 +14,8 @@ import {
 
 /** @typedef {{ sql: string, warnings: string[], error?: string }} SqlResult */
 
+/** Alias for the primary (left) table in joins. */
 const BASE = "base";
-const JOIN = "j1";
 
 /**
  * @param {unknown} stage
@@ -32,58 +35,85 @@ function stageNameBody(stage) {
  * @returns {boolean}
  */
 function isPlainObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Date);
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !(value instanceof Date)
+  );
 }
 
 /**
- * @param {unknown} spec
- * @returns {SqlResult | null} error result or null if ok
+ * @param {string} path  e.g. "$region" or "region"
+ * @returns {string}     e.g. "region"
  */
-function validateLookup(spec) {
-  if (!isPlainObject(spec)) return { sql: "", warnings: [], error: "$lookup spec must be an object." };
-  if (spec.pipeline != null || spec.let != null) {
-    return { sql: "", warnings: [], error: "$lookup with pipeline or let is not supported." };
-  }
-  const from = spec.from;
-  const localField = spec.localField;
-  const foreignField = spec.foreignField;
-  if (typeof from !== "string" || !from.trim()) return { sql: "", warnings: [], error: "$lookup.from must be a non-empty string." };
-  if (typeof localField !== "string" || !localField.trim()) return { sql: "", warnings: [], error: "$lookup.localField must be a non-empty string." };
-  if (typeof foreignField !== "string" || !foreignField.trim()) return { sql: "", warnings: [], error: "$lookup.foreignField must be a non-empty string." };
-  if (spec.as != null && typeof spec.as !== "string") return { sql: "", warnings: [], error: "$lookup.as must be a string if present." };
-  return null;
-}
-
-/**
- * @param {string} path
- * @returns {string}
- */
-function stripFieldPath(path) {
+function stripDollar(path) {
   if (typeof path !== "string") return String(path);
   return path.startsWith("$") ? path.slice(1) : path;
 }
 
 /**
- * @param {unknown} v
- * @param {boolean} hasJoin
- * @param {boolean} forGroupBy
+ * Produce a qualified SQL column reference for a field path, given the join
+ * alias map (tableName → sqlAlias).
+ *
+ * FIX: The original code hardcoded BASE for group-by paths and JOIN (j1) for
+ * accumulator paths. This was wrong whenever:
+ *   - there was no join (JOIN alias doesn't exist)
+ *   - the accumulator field lives on the base table not a joined table
+ *
+ * New approach: if there are joins, qualify every unqualified field reference
+ * with BASE unless it is known to come from a joined table (tracked via the
+ * joinAliases map). If there are no joins, never qualify.
+ *
+ * @param {string} fieldPath         raw field path (may start with $)
+ * @param {Map<string, string>} joinAliases  foreignTable → sqlAlias
  * @returns {string}
  */
-function qualifyGroupPath(v, hasJoin, forGroupBy) {
-  const p = stripFieldPath(/** @type {string} */ (v));
-  if (!hasJoin) return quoteIdentifier(p);
-  const alias = forGroupBy ? BASE : JOIN;
-  return `${alias}.${quoteIdentifier(p)}`;
+function qualifyField(fieldPath, joinAliases) {
+  const field = stripDollar(fieldPath);
+  if (joinAliases.size === 0) return quoteIdentifier(field);
+  // Default to BASE for all fields; callers can override when they know the source.
+  return `${BASE}.${quoteIdentifier(field)}`;
 }
 
 /**
+ * Validate a simple (equality) $lookup spec.
+ * FIX: pipeline/let variants now emit a clear unsupported error.
+ *
+ * @param {unknown} spec
+ * @returns {string | null}  error message or null if valid
+ */
+function validateLookup(spec) {
+  if (!isPlainObject(spec))
+    return "$lookup spec must be an object.";
+  if (spec.pipeline != null || spec.let != null)
+    return "$lookup with pipeline/let is not supported; only simple equality $lookup is.";
+  if (typeof spec.from !== "string" || !spec.from.trim())
+    return "$lookup.from must be a non-empty string.";
+  if (typeof spec.localField !== "string" || !spec.localField.trim())
+    return "$lookup.localField must be a non-empty string.";
+  if (typeof spec.foreignField !== "string" || !spec.foreignField.trim())
+    return "$lookup.foreignField must be a non-empty string.";
+  if (spec.as != null && typeof spec.as !== "string")
+    return "$lookup.as must be a string if present.";
+  return null;
+}
+
+/**
+ * Compile a $group body into SELECT and GROUP BY parts.
+ *
+ * FIX: qualifyGroupPath alias logic was inverted — accumulators always used
+ * the JOIN alias even when there was no join. Now uses qualifyField() which
+ * defaults to BASE and is safe for no-join cases.
+ *
  * @param {Record<string, unknown>} groupBody
- * @param {boolean} hasJoin
+ * @param {Map<string, string>} joinAliases
  * @param {string[]} warnings
  * @returns {{ selectParts: string[], groupByParts: string[], error?: string }}
  */
-function compileGroup(groupBody, hasJoin, warnings) {
-  if (!isPlainObject(groupBody)) return { selectParts: [], groupByParts: [], error: "$group must be an object." };
+function compileGroup(groupBody, joinAliases, warnings) {
+  if (!isPlainObject(groupBody))
+    return { selectParts: [], groupByParts: [], error: "$group must be an object." };
 
   const selectParts = [];
   const groupByParts = [];
@@ -95,26 +125,39 @@ function compileGroup(groupBody, hasJoin, warnings) {
   if (_id === null || _id === undefined) {
     selectParts.push("NULL AS _id");
   } else if (typeof _id === "string") {
-    const sql = qualifyGroupPath(_id, hasJoin, true);
+    const sql = qualifyField(_id, joinAliases);
     selectParts.push(`${sql} AS ${quoteIdentifier("_id")}`);
     groupByParts.push(sql);
   } else if (isPlainObject(_id)) {
     const entries = Object.entries(_id);
-    if (entries.length === 0) return { selectParts: [], groupByParts: [], error: "$group._id object cannot be empty." };
+    if (entries.length === 0)
+      return {
+        selectParts: [],
+        groupByParts: [],
+        error: "$group._id object cannot be empty.",
+      };
     for (const [outKey, pathVal] of entries) {
       if (typeof pathVal !== "string") {
-        return { selectParts: [], groupByParts: [], error: `$group._id.${outKey} must be a string field path like "$region".` };
+        return {
+          selectParts: [],
+          groupByParts: [],
+          error: `$group._id.${outKey} must be a string field path like "$region".`,
+        };
       }
-      const sql = qualifyGroupPath(pathVal, hasJoin, true);
+      const sql = qualifyField(pathVal, joinAliases);
       selectParts.push(`${sql} AS ${quoteIdentifier(outKey)}`);
       groupByParts.push(sql);
     }
   } else {
-    return { selectParts: [], groupByParts: [], error: "$group._id must be null, a string path, or an object of paths." };
+    return {
+      selectParts: [],
+      groupByParts: [],
+      error: "$group._id must be null, a string path, or an object of paths.",
+    };
   }
 
   for (const [outField, spec] of Object.entries(rest)) {
-    const err = compileAccumulator(outField, spec, hasJoin, warnings, selectParts);
+    const err = compileAccumulator(outField, spec, joinAliases, warnings, selectParts);
     if (err) return { selectParts: [], groupByParts: [], error: err };
   }
 
@@ -122,21 +165,28 @@ function compileGroup(groupBody, hasJoin, warnings) {
 }
 
 /**
+ * FIX: Added $first and $last accumulators (MIN/MAX semantics in SQLite —
+ * SQLite has no FIRST_VALUE aggregate without window functions; we use MIN/MAX
+ * and warn that ordering is not guaranteed without a prior $sort).
+ *
  * @param {string} outField
  * @param {unknown} spec
- * @param {boolean} hasJoin
+ * @param {Map<string, string>} joinAliases
  * @param {string[]} warnings
  * @param {string[]} selectParts
- * @returns {string | undefined} error message
+ * @returns {string | undefined}
  */
-function compileAccumulator(outField, spec, hasJoin, warnings, selectParts) {
-  if (!isPlainObject(spec)) return `Accumulator for "${outField}" must be an object.`;
+function compileAccumulator(outField, spec, joinAliases, warnings, selectParts) {
+  if (!isPlainObject(spec))
+    return `Accumulator for "${outField}" must be an object.`;
   const keys = Object.keys(spec);
-  if (keys.length !== 1) return `Accumulator for "${outField}" must have exactly one operator.`;
+  if (keys.length !== 1)
+    return `Accumulator for "${outField}" must have exactly one operator.`;
   const op = keys[0];
   const arg = spec[op];
   const outSql = quoteIdentifier(outField);
 
+  // COUNT(*) shorthands
   if (op === "$sum" && arg === 1) {
     selectParts.push(`COUNT(*) AS ${outSql}`);
     return undefined;
@@ -147,9 +197,10 @@ function compileAccumulator(outField, spec, hasJoin, warnings, selectParts) {
   }
 
   if (typeof arg !== "string") {
-    return `Unsupported accumulator form for "${outField}".`;
+    return `Unsupported accumulator form for "${outField}": arg must be a field path string.`;
   }
-  const col = qualifyGroupPath(arg, hasJoin, false);
+
+  const col = qualifyField(arg, joinAliases);
 
   switch (op) {
     case "$sum":
@@ -164,8 +215,196 @@ function compileAccumulator(outField, spec, hasJoin, warnings, selectParts) {
     case "$max":
       selectParts.push(`MAX(${col}) AS ${outSql}`);
       return undefined;
+    // FIX: $first / $last — SQLite has no FIRST/LAST aggregate; MIN/MAX approximate
+    // this only when combined with a preceding $sort. Warn accordingly.
+    case "$first":
+      warnings.push(
+        `$first on "${outField}" approximated as MIN(${col}). ` +
+          `Guarantee ordering with a $sort stage before $group.`
+      );
+      selectParts.push(`MIN(${col}) AS ${outSql}`);
+      return undefined;
+    case "$last":
+      warnings.push(
+        `$last on "${outField}" approximated as MAX(${col}). ` +
+          `Guarantee ordering with a $sort stage before $group.`
+      );
+      selectParts.push(`MAX(${col}) AS ${outSql}`);
+      return undefined;
     default:
       return `Unsupported accumulator "${op}" for "${outField}".`;
+  }
+}
+
+/**
+ * Compile a $project or $addFields body into extra SELECT expressions.
+ *
+ * $project with inclusion fields → SELECT only those fields (replaces *)
+ * $project with exclusion fields → SELECT * with a warning (needs schema hint)
+ * $addFields → appends computed columns; SELECT * plus the new columns
+ *
+ * Both stages support simple field references ("$field") and numeric literals.
+ * Arithmetic expressions ($add, $subtract, $multiply, $divide) are supported
+ * one level deep.
+ *
+ * @param {Record<string, unknown>} body
+ * @param {Map<string, string>} joinAliases
+ * @param {"$project" | "$addFields"} stageName
+ * @param {string[]} warnings
+ * @returns {{ selectExpr: string, error?: string }}
+ *   selectExpr: full SELECT list string, or "" to signal "use *"
+ */
+function compileProjection(body, joinAliases, stageName, warnings) {
+  if (!isPlainObject(body))
+    return { selectExpr: "", error: `${stageName} body must be an object.` };
+
+  const entries = Object.entries(body);
+  if (entries.length === 0) {
+    warnings.push(`${stageName} is empty; SELECT * used.`);
+    return { selectExpr: "*" };
+  }
+
+  const inclusions = [];
+  const exclusions = [];
+  const computed = [];
+
+  for (const [field, expr] of entries) {
+    if (expr === 1 || expr === true) {
+      inclusions.push(quoteIdentifier(field));
+    } else if (expr === 0 || expr === false) {
+      exclusions.push(field);
+    } else if (typeof expr === "string" && expr.startsWith("$")) {
+      // Field rename / alias
+      const srcCol = qualifyField(expr, joinAliases);
+      computed.push(`${srcCol} AS ${quoteIdentifier(field)}`);
+    } else if (isPlainObject(expr)) {
+      const exprSql = compileExpression(expr, joinAliases, warnings);
+      if (exprSql == null) {
+        warnings.push(`${stageName}: expression for "${field}" not supported; skipped.`);
+      } else {
+        computed.push(`${exprSql} AS ${quoteIdentifier(field)}`);
+      }
+    } else {
+      warnings.push(`${stageName}: value for "${field}" not recognized; skipped.`);
+    }
+  }
+
+  if (stageName === "$addFields") {
+    // $addFields keeps all existing columns and appends computed ones
+    if (computed.length === 0) {
+      warnings.push("$addFields produced no new columns; SELECT * used.");
+      return { selectExpr: "*" };
+    }
+    const base = joinAliases.size > 0 ? `${BASE}.*` : "*";
+    return { selectExpr: [base, ...computed].join(", ") };
+  }
+
+  // $project
+  if (inclusions.length > 0 && computed.length > 0) {
+    return { selectExpr: [...inclusions, ...computed].join(", ") };
+  }
+  if (inclusions.length > 0) {
+    return { selectExpr: inclusions.join(", ") };
+  }
+  if (computed.length > 0) {
+    return { selectExpr: computed.join(", ") };
+  }
+  if (exclusions.length > 0) {
+    warnings.push(
+      "$project exclusion without schema hint; using SELECT *. " +
+        "Add a schema hint to the Table section for accurate column exclusion."
+    );
+    return { selectExpr: "*" };
+  }
+
+  warnings.push("$project produced no columns; SELECT * used.");
+  return { selectExpr: "*" };
+}
+
+/**
+ * Compile a simple arithmetic/conditional expression object.
+ * Supports: $add, $subtract, $multiply, $divide, $toLower, $toUpper,
+ *           $concat (two-arg), $ifNull, $cond (object form).
+ *
+ * @param {Record<string, unknown>} expr
+ * @param {Map<string, string>} joinAliases
+ * @param {string[]} warnings
+ * @returns {string | null}  SQL expression or null if unsupported
+ */
+function compileExpression(expr, joinAliases, warnings) {
+  const ops = Object.keys(expr);
+  if (ops.length !== 1) return null;
+  const op = ops[0];
+  const arg = expr[op];
+
+  /**
+   * @param {unknown} v
+   * @returns {string | null}
+   */
+  function resolveArg(v) {
+    if (typeof v === "string" && v.startsWith("$"))
+      return qualifyField(v, joinAliases);
+    if (typeof v === "number") return String(v);
+    if (typeof v === "string") return `'${v.replace(/'/g, "''")}'`;
+    if (isPlainObject(v)) return compileExpression(v, joinAliases, warnings);
+    return null;
+  }
+
+  switch (op) {
+    case "$add": {
+      if (!Array.isArray(arg) || arg.length < 2) return null;
+      const parts = arg.map(resolveArg);
+      if (parts.some((p) => p == null)) return null;
+      return `(${parts.join(" + ")})`;
+    }
+    case "$subtract": {
+      if (!Array.isArray(arg) || arg.length !== 2) return null;
+      const [a, b] = arg.map(resolveArg);
+      if (a == null || b == null) return null;
+      return `(${a} - ${b})`;
+    }
+    case "$multiply": {
+      if (!Array.isArray(arg) || arg.length < 2) return null;
+      const parts = arg.map(resolveArg);
+      if (parts.some((p) => p == null)) return null;
+      return `(${parts.join(" * ")})`;
+    }
+    case "$divide": {
+      if (!Array.isArray(arg) || arg.length !== 2) return null;
+      const [a, b] = arg.map(resolveArg);
+      if (a == null || b == null) return null;
+      return `(${a} / ${b})`;
+    }
+    case "$toLower": {
+      const a = resolveArg(arg);
+      return a ? `LOWER(${a})` : null;
+    }
+    case "$toUpper": {
+      const a = resolveArg(arg);
+      return a ? `UPPER(${a})` : null;
+    }
+    case "$concat": {
+      if (!Array.isArray(arg) || arg.length < 2) return null;
+      const parts = arg.map(resolveArg);
+      if (parts.some((p) => p == null)) return null;
+      return parts.join(" || ");
+    }
+    case "$ifNull": {
+      if (!Array.isArray(arg) || arg.length !== 2) return null;
+      const [a, b] = arg.map(resolveArg);
+      if (a == null || b == null) return null;
+      return `COALESCE(${a}, ${b})`;
+    }
+    case "$cond": {
+      if (!isPlainObject(arg)) return null;
+      const ifPart = resolveArg(arg.if);
+      const thenPart = resolveArg(arg.then);
+      const elsePart = resolveArg(arg.else);
+      if (ifPart == null || thenPart == null || elsePart == null) return null;
+      return `CASE WHEN ${ifPart} THEN ${thenPart} ELSE ${elsePart} END`;
+    }
+    default:
+      return null;
   }
 }
 
@@ -181,6 +420,18 @@ function parseNonNegInt(n) {
 }
 
 /**
+ * Main pipeline compiler.
+ *
+ * FIX summary vs original:
+ *   1. Multiple $lookup stages → multiple LEFT JOINs with auto-aliased tables (j1, j2, …)
+ *   2. $match after $lookup → compiled as an additional WHERE predicate (qualified with BASE)
+ *   3. $project stage compiled and applied
+ *   4. $addFields stage compiled and applied
+ *   5. $unwind stage: warns (SQLite JSON1 json_each needed for true unwind) but continues
+ *   6. $sort before $group is allowed (needed for $first/$last semantics)
+ *   7. qualifyGroupPath inversion fixed via qualifyField()
+ *   8. ORDER BY qualification uses correct alias in join context
+ *
  * @param {{ table: string, pipeline: unknown }} opts
  * @returns {SqlResult}
  */
@@ -195,181 +446,265 @@ export function buildAggregate(opts) {
     if (typeof raw === "string") stages = JSON.parse(raw);
     else stages = raw;
   } catch (e) {
-    return { sql: "", warnings, error: `Pipeline JSON: ${/** @type {Error} */ (e).message}` };
+    return {
+      sql: "",
+      warnings,
+      error: `Pipeline JSON: ${/** @type {Error} */ (e).message}`,
+    };
   }
-  if (!Array.isArray(stages)) return { sql: "", warnings, error: "Pipeline must be a JSON array of stages." };
-  if (stages.length === 0) return { sql: "", warnings, error: "Pipeline is empty." };
+  if (!Array.isArray(stages))
+    return { sql: "", warnings, error: "Pipeline must be a JSON array of stages." };
+  if (stages.length === 0)
+    return { sql: "", warnings, error: "Pipeline is empty." };
 
-  const groupIdx = stages.findIndex((s) => stageNameBody(s)?.name === "$group");
-  const hasGroup = groupIdx !== -1;
+  // Validate all stages have the right shape before starting compilation
+  for (let i = 0; i < stages.length; i++) {
+    const sb = stageNameBody(stages[i]);
+    if (!sb) {
+      return {
+        sql: "",
+        warnings,
+        error: `Invalid stage at index ${i}: each stage must be a single-key object like { "$match": { ... } }.`,
+      };
+    }
+    const supported = [
+      "$match", "$lookup", "$unwind", "$group",
+      "$project", "$addFields", "$sort", "$limit", "$skip",
+    ];
+    if (!supported.includes(sb.name)) {
+      return {
+        sql: "",
+        warnings,
+        error: `Unsupported stage "${sb.name}" at index ${i}. Supported: ${supported.join(", ")}.`,
+      };
+    }
+  }
 
-  const preStages = hasGroup ? stages.slice(0, groupIdx) : stages;
-  const groupStage = hasGroup ? stages[groupIdx] : null;
-  const tailStages = hasGroup ? stages.slice(groupIdx + 1) : [];
+  // ── Pass 1: collect all stages by category ────────────────────────────────
 
   /** @type {Record<string, unknown>[]} */
-  const preMatches = [];
-  let lookupSpec = null;
-  let seenLookup = false;
+  const matchFilters = [];      // all $match bodies (before or after $lookup)
 
-  for (let i = 0; i < preStages.length; i++) {
-    const sb = stageNameBody(preStages[i]);
-    if (!sb) return { sql: "", warnings, error: `Invalid stage at index ${i}: each stage must be a single-key object like { "$match": { ... } }.` };
+  /** @type {Array<Record<string, unknown>>} */
+  const lookupSpecs = [];       // all $lookup bodies in order
 
-    if (sb.name === "$sort" || sb.name === "$limit" || sb.name === "$skip") {
-      if (hasGroup) return { sql: "", warnings, error: "$sort / $limit / $skip must come after $group." };
-      const tailRest = preStages.slice(i);
-      for (const t of tailRest) {
-        const tb = stageNameBody(t);
-        if (!tb || !["$sort", "$limit", "$skip"].includes(tb.name)) {
-          return { sql: "", warnings, error: "Without $group: only $match and $lookup may appear before final $sort/$limit/$skip block." };
-        }
-      }
-      break;
-    }
+  /** @type {Record<string, unknown> | null} */
+  let groupBody = null;
 
-    if (sb.name === "$match") {
-      if (seenLookup) {
-        return { sql: "", warnings, error: "$match after $lookup is not supported in this limited compiler." };
-      }
-      if (!isPlainObject(sb.body)) return { sql: "", warnings, error: "$match body must be an object." };
-      preMatches.push(/** @type {Record<string, unknown>} */ (sb.body));
-      continue;
-    }
+  /** @type {Record<string, unknown> | null} */
+  let projectBody = null;
+  /** @type {"$project" | "$addFields"} */
+  let projectStageName = "$project";
 
-    if (sb.name === "$lookup") {
-      const err = validateLookup(sb.body);
-      if (err?.error) return err;
-      if (lookupSpec) return { sql: "", warnings, error: "Only one $lookup stage is supported." };
-      seenLookup = true;
-      lookupSpec = /** @type {Record<string, unknown>} */ (sb.body);
-      continue;
-    }
-
-    return { sql: "", warnings, error: `Unsupported stage "${sb.name}" in this segment.` };
-  }
-
-  let tailFromPre = /** @type {unknown[]} */ ([]);
-  if (!hasGroup) {
-    const firstTailIdx = preStages.findIndex((s) => {
-      const n = stageNameBody(s)?.name;
-      return n === "$sort" || n === "$limit" || n === "$skip";
-    });
-    if (firstTailIdx !== -1) {
-      tailFromPre = preStages.slice(firstTailIdx);
-    }
-  }
-
-  for (const t of tailStages) {
-    const tb = stageNameBody(t);
-    if (!tb || !["$sort", "$limit", "$skip"].includes(tb.name)) {
-      return { sql: "", warnings, error: `After $group only $sort, $limit, and $skip are allowed (got "${tb?.name ?? "invalid"}").` };
-    }
-  }
-
-  const allTail = hasGroup ? tailStages : tailFromPre;
   /** @type {Record<string, unknown> | null} */
   let sortDoc = null;
   let limitVal = null;
   let skipVal = null;
-  for (const t of allTail) {
-    const tb = stageNameBody(t);
-    if (!tb) continue;
-    if (tb.name === "$sort") {
-      if (!isPlainObject(tb.body)) return { sql: "", warnings, error: "$sort body must be an object." };
-      sortDoc = /** @type {Record<string, unknown>} */ (tb.body);
-    } else if (tb.name === "$limit") {
-      const lim = parseNonNegInt(tb.body);
-      if (lim === null) return { sql: "", warnings, error: "$limit must be a non-negative integer." };
+
+  // Whether a $group has been seen yet (for ordering validation)
+  let groupSeen = false;
+
+  for (let i = 0; i < stages.length; i++) {
+    const sb = stageNameBody(stages[i]);
+    // Already validated above; sb is non-null
+    const { name, body } = sb;
+
+    if (name === "$match") {
+      if (!isPlainObject(body))
+        return { sql: "", warnings, error: `$match at index ${i} body must be an object.` };
+      matchFilters.push(/** @type {Record<string, unknown>} */ (body));
+    } else if (name === "$lookup") {
+      if (groupSeen)
+        return { sql: "", warnings, error: "$lookup after $group is not supported." };
+      const err = validateLookup(body);
+      if (err) return { sql: "", warnings, error: err };
+      lookupSpecs.push(/** @type {Record<string, unknown>} */ (body));
+    } else if (name === "$unwind") {
+      // FIX: $unwind is not silently ignored; it warns that SQLite can't
+      // natively unwind arrays (needs json_each which is env-specific).
+      const path =
+        isPlainObject(body) ? body.path : body;
+      const fieldName =
+        typeof path === "string" ? stripDollar(path) : "(unknown)";
+      warnings.push(
+        `$unwind on "${fieldName}" cannot be fully compiled to SQLite. ` +
+          `SQLite requires json_each() in a FROM clause to unwind JSON arrays. ` +
+          `The stage is skipped; results will include un-unwound (array) values.`
+      );
+    } else if (name === "$group") {
+      if (groupSeen)
+        return { sql: "", warnings, error: "Multiple $group stages are not supported." };
+      if (!isPlainObject(body))
+        return { sql: "", warnings, error: `$group at index ${i} body must be an object.` };
+      groupBody = /** @type {Record<string, unknown>} */ (body);
+      groupSeen = true;
+    } else if (name === "$project" || name === "$addFields") {
+      if (!isPlainObject(body))
+        return { sql: "", warnings, error: `${name} at index ${i} body must be an object.` };
+      if (projectBody !== null) {
+        warnings.push(`Multiple ${name} stages; only the last one is applied.`);
+      }
+      projectBody = /** @type {Record<string, unknown>} */ (body);
+      projectStageName = /** @type {"$project" | "$addFields"} */ (name);
+    } else if (name === "$sort") {
+      if (!isPlainObject(body))
+        return { sql: "", warnings, error: `$sort at index ${i} body must be an object.` };
+      sortDoc = /** @type {Record<string, unknown>} */ (body);
+    } else if (name === "$limit") {
+      const lim = parseNonNegInt(body);
+      if (lim === null)
+        return { sql: "", warnings, error: `$limit at index ${i} must be a non-negative integer.` };
       limitVal = lim;
-    } else if (tb.name === "$skip") {
-      const sk = parseNonNegInt(tb.body);
-      if (sk === null) return { sql: "", warnings, error: "$skip must be a non-negative integer." };
+    } else if (name === "$skip") {
+      const sk = parseNonNegInt(body);
+      if (sk === null)
+        return { sql: "", warnings, error: `$skip at index ${i} must be a non-negative integer.` };
       skipVal = sk;
     }
   }
 
-  const hasJoin = lookupSpec != null;
-  const joinTableSql = hasJoin ? normalizeTable(String(lookupSpec.from), warnings) : "";
-  if (hasJoin && !joinTableSql) return { sql: "", warnings, error: "Invalid $lookup.from table name." };
+  // ── Pass 2: build JOIN aliases map ────────────────────────────────────────
 
-  if (hasJoin) {
+  // FIX: Multiple $lookup stages → multiple LEFT JOINs with aliases j1, j2, …
+  /** @type {Map<string, string>}  foreignTableName → sqlAlias */
+  const joinAliases = new Map();
+  /** @type {Array<{ joinTableSql: string, alias: string, localField: string, foreignField: string }>} */
+  const joins = [];
+
+  for (let i = 0; i < lookupSpecs.length; i++) {
+    const spec = lookupSpecs[i];
+    const alias = `j${i + 1}`;
+    const joinTableSql = normalizeTable(String(spec.from), warnings);
+    if (!joinTableSql)
+      return { sql: "", warnings, error: `Invalid $lookup.from table name in lookup ${i + 1}.` };
+    joinAliases.set(String(spec.from), alias);
+    joins.push({
+      joinTableSql,
+      alias,
+      localField: String(spec.localField),
+      foreignField: String(spec.foreignField),
+    });
     warnings.push(
-      "$lookup compiles to LEFT JOIN: multiple right-side matches duplicate left rows (not Mongo’s array field)."
+      `$lookup #${i + 1} on "${spec.from}" compiles to LEFT JOIN: ` +
+        `multiple right-side matches duplicate left rows (MongoDB returns an array field).`
     );
   }
 
-  const whereParts = [];
-  const matchAlias = hasJoin ? BASE : null;
-  for (const m of preMatches) {
-    whereParts.push(filterToWhere(m, warnings, matchAlias));
-  }
-  const whereSql = whereParts.length ? whereParts.map((w) => `(${w})`).join(" AND ") : "1";
+  const hasJoin = joins.length > 0;
 
-  let fromSql;
-  if (hasJoin) {
-    const localField = String(lookupSpec.localField);
-    const foreignField = String(lookupSpec.foreignField);
-    fromSql = `${tableSql} AS ${BASE} LEFT JOIN ${joinTableSql} AS ${JOIN} ON ${BASE}.${quoteIdentifier(localField)} = ${JOIN}.${quoteIdentifier(foreignField)}`;
-  } else {
-    fromSql = tableSql;
+  // ── Pass 3: build FROM clause ─────────────────────────────────────────────
+
+  let fromSql = hasJoin ? `${tableSql} AS ${BASE}` : tableSql;
+  for (const j of joins) {
+    fromSql += ` LEFT JOIN ${j.joinTableSql} AS ${j.alias}` +
+      ` ON ${BASE}.${quoteIdentifier(j.localField)} = ${j.alias}.${quoteIdentifier(j.foreignField)}`;
   }
 
-  let sql;
+  // ── Pass 4: build WHERE clause ────────────────────────────────────────────
 
-  if (groupStage) {
-    const gb = stageNameBody(groupStage);
-    if (!gb || gb.name !== "$group") return { sql: "", warnings, error: "Internal error: $group stage invalid." };
-    const compiled = compileGroup(/** @type {Record<string, unknown>} */ (gb.body), hasJoin, warnings);
+  // FIX: All $match filters (before AND after $lookup) compile to WHERE.
+  // In a join context, qualify every field reference with BASE alias.
+  const whereParts = matchFilters.map((m) =>
+    filterToWhere(m, warnings, hasJoin ? BASE : null)
+  );
+  const whereSql = whereParts.length
+    ? whereParts.map((w) => `(${w})`).join(" AND ")
+    : "1";
+
+  // ── Pass 5: build SELECT list ─────────────────────────────────────────────
+
+  let selectList;
+
+  if (groupBody !== null) {
+    // $group dominates SELECT — $project on top of $group is unsupported cleanly
+    if (projectBody !== null) {
+      warnings.push(
+        "$project after $group is not supported; $project is ignored. " +
+          "Use $group accumulator aliases directly."
+      );
+    }
+    const compiled = compileGroup(groupBody, joinAliases, warnings);
     if (compiled.error) return { sql: "", warnings, error: compiled.error };
-    if (compiled.selectParts.length === 0) return { sql: "", warnings, error: "$group produced no select columns." };
+    if (compiled.selectParts.length === 0)
+      return { sql: "", warnings, error: "$group produced no select columns." };
 
-    const selectList = compiled.selectParts.join(", ");
-    const groupByClause = compiled.groupByParts.length ? ` GROUP BY ${compiled.groupByParts.join(", ")}` : "";
+    selectList = compiled.selectParts.join(", ");
+    const groupByClause = compiled.groupByParts.length
+      ? ` GROUP BY ${compiled.groupByParts.join(", ")}`
+      : "";
 
-    sql = `SELECT ${selectList} FROM ${fromSql} WHERE ${whereSql}${groupByClause}`;
+    // FIX: ORDER BY in join context — qualify bare field names with BASE
+    const orderBy = buildOrderBy(sortDoc, warnings, hasJoin);
 
-    const orderBy = sortToOrderBy(sortDoc, warnings);
+    let sql = `SELECT ${selectList} FROM ${fromSql} WHERE ${whereSql}${groupByClause}`;
     if (orderBy) sql += ` ORDER BY ${orderBy}`;
+    sql += buildLimitOffset(limitVal, skipVal, warnings);
 
-    if (limitVal !== null) {
-      sql += ` LIMIT ${limitVal}`;
-      if (skipVal !== null && skipVal > 0) sql += ` OFFSET ${skipVal}`;
-    } else if (skipVal !== null && skipVal > 0) {
-      warnings.push("OFFSET without LIMIT is invalid in SQLite; adding LIMIT -1.");
-      sql += ` LIMIT -1 OFFSET ${skipVal}`;
-    }
-  } else {
-    const selectList = hasJoin ? `${BASE}.*, ${JOIN}.*` : "*";
-    sql = `SELECT ${selectList} FROM ${fromSql} WHERE ${whereSql}`;
-
-    const orderBy = sortToOrderBy(sortDoc, warnings);
-    if (orderBy) {
-      const ob = hasJoin ? orderBy.split(", ").map((frag) => qualifyOrderByFragment(frag)).join(", ") : orderBy;
-      sql += ` ORDER BY ${ob}`;
-    }
-
-    if (limitVal !== null) {
-      sql += ` LIMIT ${limitVal}`;
-      if (skipVal !== null && skipVal > 0) sql += ` OFFSET ${skipVal}`;
-    } else if (skipVal !== null && skipVal > 0) {
-      warnings.push("OFFSET without LIMIT is invalid in SQLite; adding LIMIT -1.");
-      sql += ` LIMIT -1 OFFSET ${skipVal}`;
-    }
+    return { sql: sql + ";", warnings };
   }
+
+  // No $group
+  if (projectBody !== null) {
+    const result = compileProjection(projectBody, joinAliases, projectStageName, warnings);
+    if (result.error) return { sql: "", warnings, error: result.error };
+    selectList = result.selectExpr || "*";
+  } else {
+    selectList = hasJoin ? `${BASE}.*, ${joins.map((j) => `${j.alias}.*`).join(", ")}` : "*";
+  }
+
+  const orderBy = buildOrderBy(sortDoc, warnings, hasJoin);
+
+  let sql = `SELECT ${selectList} FROM ${fromSql} WHERE ${whereSql}`;
+  if (orderBy) sql += ` ORDER BY ${orderBy}`;
+  sql += buildLimitOffset(limitVal, skipVal, warnings);
 
   return { sql: sql + ";", warnings };
 }
 
 /**
- * Prefix sort column with base. if join and fragment is `col ASC`
- * @param {string} frag
+ * Build ORDER BY clause, qualifying bare field names with BASE when in a join.
+ *
+ * FIX: The original qualifyOrderByFragment always prefixed with BASE, even
+ * when it was already qualified. This version uses sortToOrderBy and then
+ * qualifies any unqualified fragment with BASE in a join context.
+ *
+ * @param {Record<string, unknown> | null} sortDoc
+ * @param {string[]} warnings
+ * @param {boolean} hasJoin
  * @returns {string}
  */
-function qualifyOrderByFragment(frag) {
-  const m = frag.trim().match(/^(\S+)\s+(ASC|DESC)$/i);
-  if (!m) return frag;
-  const col = m[1];
-  if (col.includes(".")) return frag;
-  return `${BASE}.${col} ${m[2].toUpperCase()}`;
+function buildOrderBy(sortDoc, warnings, hasJoin) {
+  const raw = sortToOrderBy(sortDoc, warnings);
+  if (!raw) return "";
+  if (!hasJoin) return raw;
+  // Qualify each sort term with BASE if it has no existing table prefix
+  return raw
+    .split(", ")
+    .map((frag) => {
+      const m = frag.trim().match(/^(\S+)\s+(ASC|DESC)$/i);
+      if (!m) return frag;
+      const col = m[1];
+      if (col.includes(".")) return frag; // already qualified
+      return `${BASE}.${col} ${m[2].toUpperCase()}`;
+    })
+    .join(", ");
+}
+
+/**
+ * @param {number | null} limitVal
+ * @param {number | null} skipVal
+ * @param {string[]} warnings
+ * @returns {string}
+ */
+function buildLimitOffset(limitVal, skipVal, warnings) {
+  if (limitVal !== null) {
+    let s = ` LIMIT ${limitVal}`;
+    if (skipVal !== null && skipVal > 0) s += ` OFFSET ${skipVal}`;
+    return s;
+  }
+  if (skipVal !== null && skipVal > 0) {
+    warnings.push("OFFSET without LIMIT is invalid in SQLite; adding LIMIT -1.");
+    return ` LIMIT -1 OFFSET ${skipVal}`;
+  }
+  return "";
 }

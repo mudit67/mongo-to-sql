@@ -68,7 +68,7 @@
         </label>
         <label class="check">
           <input type="checkbox" id="insertInferColumns" checked />
-          <span>Infer columns from first document</span>
+          <span>Union columns from all documents (uncheck to use first document only)</span>
         </label>
       </section>
 
@@ -79,7 +79,7 @@
           <textarea id="updateFilter" rows="4" spellcheck="false">{"_id": 1}</textarea>
         </label>
         <label class="field">
-          <span>Update (JSON: <code>$set</code>, <code>$unset</code>, or replacement object)</span>
+          <span>Update (JSON: <code>$set</code>, <code>$unset</code>, <code>$inc</code>, <code>$mul</code>, <code>$min</code>, <code>$max</code>, or replacement object)</span>
           <textarea id="updateBody" rows="5" spellcheck="false">{"$set": {"status": "archived"}, "$unset": {"temp": ""}}</textarea>
         </label>
         <label class="check">
@@ -101,8 +101,17 @@
       </section>
 
       <section id="panel-aggregate" class="tab-panel" role="tabpanel" hidden>
-        <h2>Limited aggregation pipeline</h2>
-        <p class="field-hint">JSON array of stages. Supported: <code>$match</code> (only before <code>$lookup</code>), at most one equality <code>$lookup</code>, optional <code>$group</code> (<code>$sum</code>, <code>$avg</code>, <code>$min</code>, <code>$max</code>, <code>$sum: 1</code> / <code>$count: {}</code>), then optional <code>$sort</code> / <code>$limit</code> / <code>$skip</code>.</p>
+        <h2>Aggregation pipeline</h2>
+        <p class="field-hint">
+          JSON array of stages. Supported:
+          <code>$match</code> (any position, including after <code>$lookup</code>),
+          <code>$lookup</code> (multiple, equality-join only; compiles to <code>LEFT JOIN</code>),
+          <code>$unwind</code> (warns; SQLite requires <code>json_each()</code> for true unwind),
+          <code>$project</code> (inclusion, field rename, and arithmetic expressions),
+          <code>$addFields</code> (appends computed columns),
+          <code>$group</code> with accumulators <code>$sum</code>, <code>$avg</code>, <code>$min</code>, <code>$max</code>, <code>$first</code>, <code>$last</code>,
+          then <code>$sort</code> / <code>$limit</code> / <code>$skip</code>.
+        </p>
         <label class="field">
           <span>Pipeline (JSON array)</span>
           <textarea id="aggregatePipeline" rows="14" spellcheck="false">[
@@ -134,13 +143,15 @@
     <section class="panel limitations">
       <h2>Limitations</h2>
       <ul>
-        <li><strong>Aggregate tab:</strong> only <code>$match</code>, one equality <code>$lookup</code>, <code>$group</code>, <code>$sort</code>, <code>$limit</code>, <code>$skip</code>. No <code>$match</code> after <code>$lookup</code>. <code>$lookup</code> compiles to <code>LEFT JOIN</code> (duplicate left rows when multiple right rows match).</li>
-        <li>With <code>$lookup</code>, <code>$group._id</code> paths use the <strong>left</strong> table; accumulators like <code>$sum</code> use the <strong>joined</strong> (<code>j1</code>) table.</li>
-        <li>Flat documents preferred; nested objects in filters/inserts are skipped or stringified with a warning.</li>
-        <li>Dotted field names are emitted as double-quoted SQLite identifiers (one column per path).</li>
-        <li><code>$regex</code> is approximated with <code>LIKE</code> for simple patterns; PCRE features are not supported.</li>
-        <li>Projection exclusion requires the optional schema hint column list.</li>
-        <li>UPDATE/DELETE with an empty filter are blocked unless the checkbox is checked.</li>
+        <li><strong>$lookup</strong> compiles to <code>LEFT JOIN</code>. Multiple right-side matches duplicate left rows; MongoDB returns an array field. Multiple <code>$lookup</code> stages produce multiple <code>LEFT JOIN</code>s.</li>
+        <li><strong>$unwind</strong> is noted but skipped. SQLite needs <code>json_each()</code> in the <code>FROM</code> clause to truly expand JSON arrays; this requires manual schema design.</li>
+        <li><strong>$first / $last</strong> are approximated as <code>MIN</code> / <code>MAX</code>. Add a <code>$sort</code> before <code>$group</code> and treat results as advisory.</li>
+        <li><strong>$project</strong> after <code>$group</code> is ignored; use accumulator aliases directly in <code>$group</code>.</li>
+        <li><strong>Dotted field paths</strong> (e.g. <code>"address.city"</code>) are treated as flat column names with a warning. SQLite has no nested document concept.</li>
+        <li><strong>$regex</strong> is approximated with <code>LIKE</code>; PCRE features (lookaheads, character classes, anchors) cannot be represented.</li>
+        <li><strong>Projection exclusion</strong> requires the schema hint column list in the Table section.</li>
+        <li><strong>UPDATE / DELETE</strong> with an empty filter are blocked unless the checkbox is checked.</li>
+        <li><strong>Array / nested object</strong> values in filters and inserts are stringified as JSON text with a warning.</li>
       </ul>
     </section>
   </div>
