@@ -1,0 +1,15 @@
+{
+  "name": "mongo-to-sql",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^9.9.0",
+    "better-sqlite3": "^11.10.0",
+    "express": "^4.21.2"
+  }
+}
