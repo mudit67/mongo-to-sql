@@ -39,6 +39,109 @@ const els = {
   sqlOut: $("sqlOut"),
 };
 
+const sampleButtonContainers = {
+  select: $("sampleButtonsSelect"),
+  insert: $("sampleButtonsInsert"),
+  update: $("sampleButtonsUpdate"),
+  delete: $("sampleButtonsDelete"),
+  aggregate: $("sampleButtonsAggregate"),
+};
+
+function prettyJson(obj) {
+  return JSON.stringify(obj, null, 2);
+}
+
+/**
+ * @param {unknown} data
+ */
+function wireSampleButtons(data) {
+  if (!data || typeof data !== "object") return;
+  /** @type {("select"|"insert"|"update"|"delete"|"aggregate")[]} */
+  const ops = ["select", "insert", "update", "delete", "aggregate"];
+  for (const op of ops) {
+    const container = sampleButtonContainers[op];
+    if (!container) continue;
+    const list = /** @type {unknown} */ (data)[op];
+    if (!Array.isArray(list) || list.length === 0) {
+      container.replaceChildren();
+      continue;
+    }
+    container.replaceChildren();
+    list.forEach((item, i) => {
+      if (!item || typeof item !== "object") return;
+      const sample = /** @type {Record<string, unknown>} */ (item);
+      const n = i + 1;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn";
+      btn.textContent = `Load sample ${n}`;
+      const label = sample.label;
+      if (typeof label === "string" && label) btn.title = label;
+      btn.addEventListener("click", () => {
+        const table = sample.table;
+        if (typeof table === "string") els.tableName.value = table;
+
+        if (op === "select") {
+          if ("schemaHint" in sample)
+            els.schemaHint.value =
+              typeof sample.schemaHint === "string" ? sample.schemaHint : "";
+          if ("filter" in sample)
+            els.selectFilter.value = prettyJson(sample.filter);
+          if ("projection" in sample)
+            els.selectProjection.value = prettyJson(sample.projection);
+          else els.selectProjection.value = "{}";
+          if ("sort" in sample) els.selectSort.value = prettyJson(sample.sort);
+          else els.selectSort.value = "{}";
+          const lim = sample.limit;
+          els.selectLimit.value =
+            lim != null && lim !== "" ? String(/** @type {number|string} */ (lim)) : "";
+          const sk = sample.skip;
+          els.selectSkip.value =
+            sk != null && sk !== "" ? String(/** @type {number|string} */ (sk)) : "";
+        } else if (op === "insert") {
+          if ("docs" in sample)
+            els.insertDocs.value = prettyJson(sample.docs);
+          if ("inferColumns" in sample)
+            els.insertInferColumns.checked = Boolean(sample.inferColumns);
+        } else if (op === "update") {
+          if ("filter" in sample)
+            els.updateFilter.value = prettyJson(sample.filter);
+          if ("update" in sample)
+            els.updateBody.value = prettyJson(sample.update);
+          if ("allowEmptyFilter" in sample)
+            els.updateAllowEmptyFilter.checked = Boolean(
+              sample.allowEmptyFilter,
+            );
+        } else if (op === "delete") {
+          if ("filter" in sample)
+            els.deleteFilter.value = prettyJson(sample.filter);
+          if ("allowEmptyFilter" in sample)
+            els.deleteAllowEmptyFilter.checked = Boolean(
+              sample.allowEmptyFilter,
+            );
+        } else if (op === "aggregate") {
+          if ("pipeline" in sample)
+            els.aggregatePipeline.value = prettyJson(sample.pipeline);
+        }
+
+        setTab(op);
+        setMessage("", "");
+      });
+      container.appendChild(btn);
+    });
+  }
+}
+
+fetch(new URL("sample.json", import.meta.url).href)
+  .then((r) => {
+    if (!r.ok) throw new Error(String(r.status));
+    return r.json();
+  })
+  .then(wireSampleButtons)
+  .catch(() => {
+    console.warn("Could not load sample.json (serve the app over HTTP if using a file URL).");
+  });
+
 /** @type {"select"|"insert"|"update"|"delete"|"aggregate"} */
 let activeTab = "select";
 
@@ -143,7 +246,7 @@ function generate() {
 
 els.btnGenerate.addEventListener("click", generate);
 
-els.btnCopy.addEventListener("click", async () => {
+els.btnCopy?.addEventListener("click", async () => {
   const text = els.sqlOut.textContent || "";
   if (!text) {
     setMessage("Nothing to copy.", "warn");
@@ -157,7 +260,7 @@ els.btnCopy.addEventListener("click", async () => {
   }
 });
 
-els.btnDownload.addEventListener("click", () => {
+els.btnDownload?.addEventListener("click", () => {
   const text = els.sqlOut.textContent || "";
   if (!text) {
     setMessage("Nothing to download.", "warn");

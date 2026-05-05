@@ -36,6 +36,7 @@
     <div class="tab-panels">
       <section id="panel-select" class="tab-panel active" role="tabpanel">
         <h2>Read (find)</h2>
+        <div class="sample-buttons" id="sampleButtonsSelect" aria-label="Sample SELECT queries"></div>
         <label class="field">
           <span>Filter (JSON object)</span>
           <textarea id="selectFilter" rows="5" spellcheck="false">{"status": "active", "age": {"$gte": 18}}</textarea>
@@ -62,6 +63,7 @@
 
       <section id="panel-insert" class="tab-panel" role="tabpanel" hidden>
         <h2>Insert</h2>
+        <div class="sample-buttons" id="sampleButtonsInsert" aria-label="Sample INSERT payloads"></div>
         <label class="field">
           <span>Documents (JSON object or array of objects)</span>
           <textarea id="insertDocs" rows="8" spellcheck="false">[{"name": "Ada", "score": 10}, {"name": "Bob", "score": 7}]</textarea>
@@ -74,6 +76,7 @@
 
       <section id="panel-update" class="tab-panel" role="tabpanel" hidden>
         <h2>Update</h2>
+        <div class="sample-buttons" id="sampleButtonsUpdate" aria-label="Sample UPDATE queries"></div>
         <label class="field">
           <span>Filter (JSON object)</span>
           <textarea id="updateFilter" rows="4" spellcheck="false">{"_id": 1}</textarea>
@@ -90,6 +93,7 @@
 
       <section id="panel-delete" class="tab-panel" role="tabpanel" hidden>
         <h2>Delete</h2>
+        <div class="sample-buttons" id="sampleButtonsDelete" aria-label="Sample DELETE queries"></div>
         <label class="field">
           <span>Filter (JSON object)</span>
           <textarea id="deleteFilter" rows="4" spellcheck="false">{"status": "deleted"}</textarea>
@@ -102,6 +106,7 @@
 
       <section id="panel-aggregate" class="tab-panel" role="tabpanel" hidden>
         <h2>Aggregation pipeline</h2>
+        <div class="sample-buttons" id="sampleButtonsAggregate" aria-label="Sample aggregation pipelines"></div>
         <p class="field-hint">
           JSON array of stages. Supported:
           <code>$match</code> (any position, including after <code>$lookup</code>),
@@ -130,8 +135,8 @@
 
     <section class="panel actions">
       <button type="button" class="btn primary" id="btnGenerate">Generate SQL</button>
-      <button type="button" class="btn" id="btnCopy">Copy</button>
-      <button type="button" class="btn" id="btnDownload">Download .sql</button>
+      <!-- <button type="button" class="btn" id="btnCopy">Copy</button>
+      <button type="button" class="btn" id="btnDownload">Download .sql</button> -->
     </section>
 
     <section class="panel output">
@@ -140,7 +145,7 @@
       <pre id="sqlOut" class="sql-out" tabindex="0"></pre>
     </section>
 
-    <section class="panel limitations">
+    <!-- <section class="panel limitations">
       <h2>Limitations</h2>
       <ul>
         <li><strong>$lookup</strong> compiles to <code>LEFT JOIN</code>. Multiple right-side matches duplicate left rows; MongoDB returns an array field. Multiple <code>$lookup</code> stages produce multiple <code>LEFT JOIN</code>s.</li>
@@ -153,7 +158,7 @@
         <li><strong>UPDATE / DELETE</strong> with an empty filter are blocked unless the checkbox is checked.</li>
         <li><strong>Array / nested object</strong> values in filters and inserts are stringified as JSON text with a warning.</li>
       </ul>
-    </section>
+    </section> -->
   </div>
 
   <script type="module" src="app.js"></script>

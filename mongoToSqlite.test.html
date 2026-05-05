@@ -55,7 +55,11 @@
       assert(filterToWhere({ x: 1 }, w, "base").includes("base.x"), "filter alias");
 
       w = [];
-      assert(projectionToSelect({ a: 1, b: 1 }, null, w) === "a, b", "projection");
+      assert(projectionToSelect({ a: 1, b: 1 }, null, w) === "_id, a, b", "projection mongo default _id");
+      assert(
+        projectionToSelect({ a: 1, b: 1, _id: 0 }, null, w) === "a, b",
+        "projection _id suppressed"
+      );
 
       w = [];
       assert(

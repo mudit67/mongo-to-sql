@@ -317,9 +317,19 @@ export function filterToWhere(filter, warnings, tableAlias = null) {
       continue;
     }
     if (key === "$not") {
+      const operand = filter.$not;
+      // `$not` on `{}` used to compile to `NOT (1)` → SQLite false (no rows).
+      // An empty predicate has no constraints, so invert nothing → match-all.
+      if (isPlainObject(operand) && Object.keys(operand).length === 0) {
+        warnings.push(
+          'Top-level $not with empty object {}; no constraints to negate — treated as match-all.'
+        );
+        parts.push("1");
+        continue;
+      }
       parts.push(
         `NOT (${filterToWhere(
-          /** @type {Record<string, unknown>} */ (filter.$not),
+          /** @type {Record<string, unknown>} */ (operand),
           warnings,
           tableAlias
         )})`
@@ -344,7 +354,11 @@ export function projectionToSelect(projection, schemaColumns, warnings) {
   }
   if (Array.isArray(projection)) {
     if (projection.length === 0) return "*";
-    return projection.map((c) => quoteIdentifier(String(c))).join(", ");
+    const names = projection.map((c) => String(c));
+    const cols = names.map((c) => quoteIdentifier(c));
+    if (!names.includes("_id"))
+      cols.unshift(quoteIdentifier("_id"));
+    return cols.join(", ");
   }
   if (!isPlainObject(projection)) {
     warnings.push("Projection not object/array; using SELECT *.");
@@ -361,7 +375,17 @@ export function projectionToSelect(projection, schemaColumns, warnings) {
   }
 
   if (inclusion.length > 0) {
-    return inclusion.map(([k]) => quoteIdentifier(k)).join(", ");
+    const idExplicitlyExcluded = entries.some(
+      ([k, v]) => k === "_id" && (v === 0 || v === false),
+    );
+    const idExplicitlyIncluded = inclusion.some(([k]) => k === "_id");
+
+    let cols = inclusion.map(([k]) => quoteIdentifier(k));
+    // MongoDB: inclusion projection retains _id unless explicitly {_id: 0}.
+    if (!idExplicitlyExcluded && !idExplicitlyIncluded) {
+      cols.unshift(quoteIdentifier("_id"));
+    }
+    return cols.join(", ");
   }
 
   if (exclusion.length > 0) {
@@ -371,6 +395,8 @@ export function projectionToSelect(projection, schemaColumns, warnings) {
     }
     const omit = new Set(exclusion.map(([k]) => k));
     const cols = schemaColumns.filter((c) => !omit.has(c));
+    // MongoDB: _id is included by default unless explicitly excluded.
+    if (!omit.has("_id") && !cols.includes("_id")) cols.unshift("_id");
     if (cols.length === 0) {
       warnings.push("All columns excluded; using SELECT *.");
       return "*";
@@ -413,6 +439,17 @@ export function parseSchemaHint(raw) {
     .map((s) => s.trim())
     .filter(Boolean);
   return cols.length ? cols : null;
+}
+
+/**
+ * Unconstrained filter → `filterToWhere` returns `1` (TRUE). Omit WHERE so SQL
+ * matches all rows without a misleading `WHERE 1` / `NOT (1)` edge case.
+ * @param {string} whereExpr
+ * @returns {string}  ` WHERE …` or ""
+ */
+function sqlWhereClause(whereExpr) {
+  if (String(whereExpr).trim() === "1") return "";
+  return ` WHERE ${whereExpr}`;
 }
 
 /**
@@ -460,7 +497,7 @@ export function buildSelect(opts) {
   const where = filterToWhere(filterObj, warnings);
   const orderBy = sortToOrderBy(sort, warnings);
 
-  let sql = `SELECT ${selectList} FROM ${table} WHERE ${where}`;
+  let sql = `SELECT ${selectList} FROM ${table}${sqlWhereClause(where)}`;
   if (orderBy) sql += ` ORDER BY ${orderBy}`;
 
   const lim = parseOptionalInt(opts.limit);
@@ -750,7 +787,7 @@ export function buildUpdate(opts) {
       error: "No SET clauses produced (empty operators or replacement object?).",
     };
 
-  const sql = `UPDATE ${table} SET ${sets.join(", ")} WHERE ${where};`;
+  const sql = `UPDATE ${table} SET ${sets.join(", ")}${sqlWhereClause(where)};`;
   return { sql, warnings };
 }
 
@@ -781,6 +818,6 @@ export function buildDelete(opts) {
     };
   }
 
-  const sql = `DELETE FROM ${table} WHERE ${where};`;
+  const sql = `DELETE FROM ${table}${sqlWhereClause(where)};`;
   return { sql, warnings };
 }

@@ -1,29 +1,62 @@
 {
   "select": [
     {
-      "label": "Dotted path warning + compound operators",
-      "table": "users",
-      "filter": { "address.city": "Delhi", "age": { "$gte": 18, "$lte": 60 }, "tags": { "$in": ["admin", "mod"] }, "deleted": { "$exists": false } },
+      "label": "mongoToSqlite.test.html — buildSelect",
+      "table": "t",
+      "schemaHint": "",
+      "filter": { "x": 1 },
       "projection": {},
       "sort": {},
       "limit": null,
       "skip": null
     },
     {
-      "label": "$nor + $not + $regex with metacharacters",
+      "label": "mongoToSqlite.test.html — filterToWhere $gte",
       "table": "users",
-      "filter": { "$nor": [{ "status": "banned" }, { "role": "guest" }], "email": { "$regex": ".*@gmail\\.com", "$options": "i" }, "score": { "$not": { "$lt": 50 } } },
-      "projection": { "email": 1, "score": 1 },
-      "sort": { "score": -1 },
+      "schemaHint": "",
+      "filter": { "age": { "$gte": 18 } },
+      "projection": { "name": 1, "email": 1 },
+      "sort": { "id": -1 },
       "limit": null,
       "skip": null
     },
     {
-      "label": "$elemMatch + $size + $type (should warn and skip, not crash)",
-      "table": "users",
-      "filter": { "scores": { "$elemMatch": { "$gt": 90 } }, "tags": { "$size": 3 }, "name": { "$type": "string" } },
+      "label": "mongoToSqlite.test.html — $or",
+      "table": "t",
+      "schemaHint": "",
+      "filter": { "$or": [{ "a": 1 }, { "b": 2 }] },
       "projection": {},
       "sort": {},
+      "limit": null,
+      "skip": null
+    },
+    {
+      "label": "mongoToSqlite.test.html — projection exclusion (parseSchemaHint a,b,c)",
+      "table": "t",
+      "schemaHint": "a, b, c",
+      "filter": {},
+      "projection": { "a": 0 },
+      "sort": {},
+      "limit": null,
+      "skip": null
+    },
+    {
+      "label": "mongoToSqlite.test.html — sortToOrderBy DESC / ASC",
+      "table": "t",
+      "schemaHint": "",
+      "filter": {},
+      "projection": { "x": 1, "y": 1 },
+      "sort": { "x": -1, "y": 1 },
+      "limit": null,
+      "skip": null
+    },
+    {
+      "label": "index.html default SELECT",
+      "table": "users",
+      "schemaHint": "",
+      "filter": { "status": "active", "age": { "$gte": 18 } },
+      "projection": { "name": 1, "email": 1 },
+      "sort": { "created_at": -1 },
       "limit": null,
       "skip": null
     }
@@ -31,134 +64,99 @@
 
   "insert": [
     {
-      "label": "Multi-doc with mismatched keys — union columns (checkbox ON)",
+      "label": "mongoToSqlite.test.html — buildInsert",
+      "table": "t",
+      "inferColumns": true,
+      "docs": [{ "a": 1 }]
+    },
+    {
+      "label": "index.html default INSERT",
       "table": "users",
       "inferColumns": true,
       "docs": [
-        { "id": 1, "name": "Alice", "role": "admin" },
-        { "id": 2, "email": "bob@x.com", "score": 99 },
-        { "id": 3, "name": "Carol", "email": "c@x.com", "score": 42, "role": "user" }
+        { "name": "Ada", "score": 10 },
+        { "name": "Bob", "score": 7 }
       ]
     },
     {
-      "label": "Multi-doc with mismatched keys — first-doc only (checkbox OFF)",
+      "label": "inferColumns false — columns from first document only (buildInsert)",
       "table": "users",
       "inferColumns": false,
       "docs": [
         { "id": 1, "name": "Alice", "role": "admin" },
-        { "id": 2, "email": "bob@x.com", "score": 99 },
-        { "id": 3, "name": "Carol", "email": "c@x.com", "score": 42, "role": "user" }
-      ]
-    },
-    {
-      "label": "Nested object + array + mixed scalar types (should stringify with warnings)",
-      "table": "products",
-      "inferColumns": true,
-      "docs": [
-        { "id": 10, "meta": { "source": "web", "ver": 2 }, "tags": ["x", "y"], "active": true, "ratio": 0.75 }
+        { "id": 2, "email": "bob@x.com", "score": 99 }
       ]
     }
   ],
 
   "update": [
     {
-      "label": "$inc + $set together",
-      "table": "posts",
-      "filter": { "_id": 42 },
-      "update": { "$inc": { "views": 1, "likes": -3 }, "$set": { "last_seen": "2025-01-01" } },
+      "label": "index.html default UPDATE",
+      "table": "users",
+      "filter": { "_id": 1 },
+      "update": { "$set": { "status": "archived" }, "$unset": { "temp": "" } },
       "allowEmptyFilter": false
     },
     {
-      "label": "$mul + $min + $max",
+      "label": "$inc / $mul / $min / $max (buildUpdate)",
       "table": "products",
-      "filter": { "tier": "premium" },
-      "update": { "$mul": { "price": 1.1 }, "$min": { "floor_price": 5 }, "$max": { "ceiling_price": 500 } },
+      "filter": { "id": 1 },
+      "update": {
+        "$inc": { "views": 1 },
+        "$mul": { "price": 1.05 },
+        "$min": { "floor_price": 5 },
+        "$max": { "ceiling_price": 500 }
+      },
       "allowEmptyFilter": false
     },
     {
-      "label": "$rename (should warn, not crash)",
+      "label": "$set plus $rename (warns; $rename has no SET clause)",
       "table": "users",
       "filter": { "_id": 1 },
-      "update": { "$rename": { "oldCol": "newCol" } },
+      "update": { "$set": { "name": "Ann" }, "$rename": { "oldCol": "newCol" } },
       "allowEmptyFilter": false
     },
     {
-      "label": "Mixed $ and plain keys (should hard-error)",
+      "label": "Replacement document (no $ keys)",
       "table": "users",
       "filter": { "_id": 1 },
-      "update": { "$set": { "a": 1 }, "b": 2 },
+      "update": { "status": "active", "score": 0 },
       "allowEmptyFilter": false
+    }
+  ],
+
+  "delete": [
+    {
+      "label": "index.html default DELETE",
+      "table": "users",
+      "filter": { "status": "deleted" },
+      "allowEmptyFilter": false
+    },
+    {
+      "label": "mongoToSqlite.test.html — buildDelete with empty filter + allowEmptyFilter",
+      "table": "t",
+      "filter": {},
+      "allowEmptyFilter": true
     }
   ],
 
   "aggregate": [
     {
-      "label": "Multiple $lookup + $match after join + $group",
+      "label": "mongoToSqlite.test.html — $match, $group, $sort, $limit",
       "table": "users",
       "pipeline": [
         { "$match": { "status": "active" } },
-        { "$lookup": { "from": "orders", "localField": "_id", "foreignField": "user_id", "as": "orders" } },
-        { "$lookup": { "from": "payments", "localField": "_id", "foreignField": "customer_id", "as": "payments" } },
-        { "$match": { "country": "IN" } },
         { "$group": { "_id": "$region", "total": { "$sum": "$amount" }, "n": { "$sum": 1 } } },
         { "$sort": { "total": -1 } },
-        { "$limit": 5 }
+        { "$limit": 10 }
       ]
     },
     {
-      "label": "$first + $last with pre-sort",
-      "table": "employees",
-      "pipeline": [
-        { "$sort": { "created_at": 1 } },
-        { "$group": {
-            "_id": "$dept",
-            "earliest": { "$first": "$created_at" },
-            "latest": { "$last": "$updated_at" },
-            "top_score": { "$max": "$score" }
-        }}
-      ]
-    },
-    {
-      "label": "$addFields with arithmetic expressions",
-      "table": "sales",
-      "pipeline": [
-        { "$match": { "active": true } },
-        { "$addFields": {
-            "full_name": { "$concat": ["$first_name", " ", "$last_name"] },
-            "discounted": { "$multiply": ["$price", 0.9] },
-            "net": { "$subtract": ["$revenue", "$cost"] }
-        }},
-        { "$sort": { "net": -1 } },
-        { "$limit": 20 }
-      ]
-    },
-    {
-      "label": "$project with $cond and $ifNull",
+      "label": "mongoToSqlite.test.html — $lookup equality join",
       "table": "users",
       "pipeline": [
-        { "$project": {
-            "name": 1,
-            "score": 1,
-            "label": { "$cond": { "if": "$is_premium", "then": "VIP", "else": "standard" } },
-            "display_email": { "$ifNull": ["$email", "hidden"] }
-        }}
-      ]
-    },
-    {
-      "label": "$unwind (should warn and continue, not error)",
-      "table": "users",
-      "pipeline": [
-        { "$match": { "dept": "eng" } },
-        { "$unwind": "$skills" },
-        { "$group": { "_id": "$skills", "count": { "$sum": 1 } } },
-        { "$sort": { "count": -1 } }
-      ]
-    },
-    {
-      "label": "Unsupported accumulator $push (should hard-error clearly)",
-      "table": "orders",
-      "pipeline": [
-        { "$group": { "_id": "$category", "ids": { "$push": "$_id" } } }
+        { "$match": { "id": 1 } },
+        { "$lookup": { "from": "orders", "localField": "id", "foreignField": "user_id" } }
       ]
     }
   ]

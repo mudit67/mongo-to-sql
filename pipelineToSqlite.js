@@ -289,6 +289,24 @@ function compileProjection(body, joinAliases, stageName, warnings) {
     }
   }
 
+  const mongoIdExcluded = exclusions.includes("_id");
+  const mongoIdIncludedExplicit = entries.some(
+    ([k, v]) => k === "_id" && (v === 1 || v === true),
+  );
+  /** MongoDB $project retains _id unless {_id: 0}. */
+  const idColRef =
+    joinAliases.size > 0 ? `${BASE}.${quoteIdentifier("_id")}` : quoteIdentifier("_id");
+  /** @param {string[]} cols */
+  const leadMongoProjectIdIfNeeded = (cols) => {
+    if (
+      mongoIdExcluded ||
+      mongoIdIncludedExplicit ||
+      cols.length === 0
+    )
+      return cols;
+    return [idColRef, ...cols];
+  };
+
   if (stageName === "$addFields") {
     // $addFields keeps all existing columns and appends computed ones
     if (computed.length === 0) {
@@ -301,13 +319,16 @@ function compileProjection(body, joinAliases, stageName, warnings) {
 
   // $project
   if (inclusions.length > 0 && computed.length > 0) {
-    return { selectExpr: [...inclusions, ...computed].join(", ") };
+    const incWithId = leadMongoProjectIdIfNeeded(inclusions);
+    return { selectExpr: [...incWithId, ...computed].join(", ") };
   }
   if (inclusions.length > 0) {
-    return { selectExpr: inclusions.join(", ") };
+    return { selectExpr: leadMongoProjectIdIfNeeded(inclusions).join(", ") };
   }
   if (computed.length > 0) {
-    return { selectExpr: computed.join(", ") };
+    let parts = [...computed];
+    if (!mongoIdExcluded && !mongoIdIncludedExplicit) parts.unshift(idColRef);
+    return { selectExpr: parts.join(", ") };
   }
   if (exclusions.length > 0) {
     warnings.push(
@@ -607,9 +628,12 @@ export function buildAggregate(opts) {
   const whereParts = matchFilters.map((m) =>
     filterToWhere(m, warnings, hasJoin ? BASE : null)
   );
-  const whereSql = whereParts.length
-    ? whereParts.map((w) => `(${w})`).join(" AND ")
-    : "1";
+  const tautologyOnly =
+    whereParts.length === 0 ||
+    whereParts.every((w) => String(w).trim() === "1");
+  const whereSql = tautologyOnly
+    ? ""
+    : whereParts.map((w) => `(${w})`).join(" AND ");
 
   // ── Pass 5: build SELECT list ─────────────────────────────────────────────
 
@@ -636,7 +660,8 @@ export function buildAggregate(opts) {
     // FIX: ORDER BY in join context — qualify bare field names with BASE
     const orderBy = buildOrderBy(sortDoc, warnings, hasJoin);
 
-    let sql = `SELECT ${selectList} FROM ${fromSql} WHERE ${whereSql}${groupByClause}`;
+    const whereFrag = whereSql ? ` WHERE ${whereSql}` : "";
+    let sql = `SELECT ${selectList} FROM ${fromSql}${whereFrag}${groupByClause}`;
     if (orderBy) sql += ` ORDER BY ${orderBy}`;
     sql += buildLimitOffset(limitVal, skipVal, warnings);
 
@@ -654,7 +679,8 @@ export function buildAggregate(opts) {
 
   const orderBy = buildOrderBy(sortDoc, warnings, hasJoin);
 
-  let sql = `SELECT ${selectList} FROM ${fromSql} WHERE ${whereSql}`;
+  const whereFrag = whereSql ? ` WHERE ${whereSql}` : "";
+  let sql = `SELECT ${selectList} FROM ${fromSql}${whereFrag}`;
   if (orderBy) sql += ` ORDER BY ${orderBy}`;
   sql += buildLimitOffset(limitVal, skipVal, warnings);
 
