@@ -1,57 +1,57 @@
 {
   "select": [
     {
-      "label": "mongoToSqlite.test.html — buildSelect",
-      "table": "t",
+      "label": "Users by region and status",
+      "table": "users",
       "schemaHint": "",
-      "filter": { "x": 1 },
-      "projection": {},
-      "sort": {},
+      "filter": { "region": "north", "status": "active" },
+      "projection": { "name": 1, "email": 1, "created_at": 1 },
+      "sort": { "created_at": -1 },
       "limit": null,
       "skip": null
     },
     {
-      "label": "mongoToSqlite.test.html — filterToWhere $gte",
+      "label": "Adult users with projection",
       "table": "users",
       "schemaHint": "",
       "filter": { "age": { "$gte": 18 } },
       "projection": { "name": 1, "email": 1 },
-      "sort": { "id": -1 },
+      "sort": { "_id": -1 },
       "limit": null,
       "skip": null
     },
     {
-      "label": "mongoToSqlite.test.html — $or",
-      "table": "t",
+      "label": "Books by genre or low copies",
+      "table": "books",
       "schemaHint": "",
-      "filter": { "$or": [{ "a": 1 }, { "b": 2 }] },
-      "projection": {},
+      "filter": { "$or": [{ "genre": "science" }, { "available_copies": { "$lte": 2 } }] },
+      "projection": { "title": 1, "genre": 1, "available_copies": 1 },
+      "sort": { "published_year": -1 },
+      "limit": null,
+      "skip": null
+    },
+    {
+      "label": "Users projection exclusion via schemaHint",
+      "table": "users",
+      "schemaHint": "_id, name, email, status, region, age, created_at",
+      "filter": {},
+      "projection": { "email": 0, "created_at": 0 },
       "sort": {},
       "limit": null,
       "skip": null
     },
     {
-      "label": "mongoToSqlite.test.html — projection exclusion (parseSchemaHint a,b,c)",
-      "table": "t",
-      "schemaHint": "a, b, c",
-      "filter": {},
-      "projection": { "a": 0 },
-      "sort": {},
-      "limit": null,
-      "skip": null
-    },
-    {
-      "label": "mongoToSqlite.test.html — sortToOrderBy DESC / ASC",
-      "table": "t",
+      "label": "Borrow records sorted by status and date",
+      "table": "borrows",
       "schemaHint": "",
       "filter": {},
-      "projection": { "x": 1, "y": 1 },
-      "sort": { "x": -1, "y": 1 },
+      "projection": { "user_id": 1, "book_id": 1, "status": 1, "borrowed_at": 1 },
+      "sort": { "status": 1, "borrowed_at": -1 },
       "limit": null,
       "skip": null
     },
     {
-      "label": "index.html default SELECT",
+      "label": "Default users SELECT",
       "table": "users",
       "schemaHint": "",
       "filter": { "status": "active", "age": { "$gte": 18 } },
@@ -64,77 +64,144 @@
 
   "insert": [
     {
-      "label": "mongoToSqlite.test.html — buildInsert",
-      "table": "t",
-      "inferColumns": true,
-      "docs": [{ "a": 1 }]
-    },
-    {
-      "label": "index.html default INSERT",
+      "label": "Insert one user",
       "table": "users",
       "inferColumns": true,
       "docs": [
-        { "name": "Ada", "score": 10 },
-        { "name": "Bob", "score": 7 }
+        {
+          "_id": "usr_sample_001",
+          "name": "Ada Lovelace",
+          "email": "ada.lovelace@example.com",
+          "status": "active",
+          "region": "north",
+          "age": 36,
+          "created_at": "2026-01-15T10:00:00.000Z"
+        }
       ]
     },
     {
-      "label": "inferColumns false — columns from first document only (buildInsert)",
-      "table": "users",
+      "label": "Insert two books",
+      "table": "books",
+      "inferColumns": true,
+      "docs": [
+        {
+          "_id": "book_sample_001",
+          "title": "Practical SQL Patterns",
+          "author": "Jamie Doe",
+          "genre": "technology",
+          "published_year": 2024,
+          "available_copies": 6,
+          "created_at": "2026-02-01T09:30:00.000Z"
+        },
+        {
+          "_id": "book_sample_002",
+          "title": "The Science Ledger",
+          "author": "Alex Roe",
+          "genre": "science",
+          "published_year": 2022,
+          "available_copies": 3,
+          "created_at": "2026-02-01T09:45:00.000Z"
+        }
+      ]
+    },
+    {
+      "label": "Insert borrows with inferColumns=false",
+      "table": "borrows",
       "inferColumns": false,
       "docs": [
-        { "id": 1, "name": "Alice", "role": "admin" },
-        { "id": 2, "email": "bob@x.com", "score": 99 }
+        {
+          "_id": "brw_sample_001",
+          "user_id": "usr_sample_001",
+          "book_id": "book_sample_001",
+          "borrowed_at": "2026-03-01T12:00:00.000Z",
+          "returned_at": null,
+          "status": "borrowed"
+        },
+        {
+          "_id": "brw_sample_002",
+          "user_id": "usr_sample_001",
+          "book_id": "book_sample_002",
+          "borrowed_at": "2026-03-02T15:00:00.000Z",
+          "status": "borrowed"
+        }
+      ]
+    },
+    {
+      "label": "Default users INSERT",
+      "table": "users",
+      "inferColumns": true,
+      "docs": [
+        {
+          "_id": "usr_sample_002",
+          "name": "Bob Stone",
+          "email": "bob.stone@example.com",
+          "status": "inactive",
+          "region": "west",
+          "age": 29,
+          "created_at": "2026-01-10T08:00:00.000Z"
+        },
+        {
+          "_id": "usr_sample_003",
+          "name": "Cara Bloom",
+          "email": "cara.bloom@example.com",
+          "status": "active",
+          "region": "east",
+          "age": 41,
+          "created_at": "2026-01-11T11:20:00.000Z"
+        }
       ]
     }
   ],
 
   "update": [
     {
-      "label": "index.html default UPDATE",
+      "label": "Default users UPDATE",
       "table": "users",
-      "filter": { "_id": 1 },
-      "update": { "$set": { "status": "archived" }, "$unset": { "temp": "" } },
+      "filter": { "email": "bob.stone@example.com" },
+      "update": { "$set": { "status": "blocked" } },
       "allowEmptyFilter": false
     },
     {
-      "label": "$inc / $mul / $min / $max (buildUpdate)",
-      "table": "products",
-      "filter": { "id": 1 },
+      "label": "$inc / $mul / $min / $max on books",
+      "table": "books",
+      "filter": { "genre": "technology" },
       "update": {
-        "$inc": { "views": 1 },
-        "$mul": { "price": 1.05 },
-        "$min": { "floor_price": 5 },
-        "$max": { "ceiling_price": 500 }
+        "$inc": { "available_copies": 1 },
+        "$mul": { "published_year": 1 },
+        "$min": { "published_year": 2000 },
+        "$max": { "available_copies": 10 }
       },
       "allowEmptyFilter": false
     },
     {
-      "label": "$set plus $rename (warns; $rename has no SET clause)",
+      "label": "$set plus $rename warning on users",
       "table": "users",
-      "filter": { "_id": 1 },
-      "update": { "$set": { "name": "Ann" }, "$rename": { "oldCol": "newCol" } },
+      "filter": { "region": "north" },
+      "update": { "$set": { "status": "active" }, "$rename": { "nickname": "display_name" } },
       "allowEmptyFilter": false
     },
     {
-      "label": "Replacement document (no $ keys)",
-      "table": "users",
-      "filter": { "_id": 1 },
-      "update": { "status": "active", "score": 0 },
+      "label": "Replacement document on borrows",
+      "table": "borrows",
+      "filter": { "status": "borrowed" },
+      "update": {
+        "status": "returned",
+        "returned_at": "2026-03-15T00:00:00.000Z"
+      },
       "allowEmptyFilter": false
     }
   ],
 
   "delete": [
     {
-      "label": "index.html default DELETE",
-      "table": "users",
-      "filter": { "status": "deleted" },
+      "label": "Delete returned borrows",
+      "table": "borrows",
+      "filter": { "status": "returned" },
       "allowEmptyFilter": false
     },
     {
-      "label": "mongoToSqlite.test.html — buildDelete with empty filter + allowEmptyFilter",
-      "table": "t",
+      "label": "Delete all inactive users (explicit allow)",
+      "table": "users",
       "filter": {},
       "allowEmptyFilter": true
     }
@@ -142,21 +209,29 @@
 
   "aggregate": [
     {
-      "label": "mongoToSqlite.test.html — $match, $group, $sort, $limit",
+      "label": "Group users by region",
       "table": "users",
       "pipeline": [
         { "$match": { "status": "active" } },
-        { "$group": { "_id": "$region", "total": { "$sum": "$amount" }, "n": { "$sum": 1 } } },
-        { "$sort": { "total": -1 } },
+        { "$group": { "_id": "$region", "n": { "$sum": 1 }, "avg_age": { "$avg": "$age" } } },
+        { "$sort": { "n": -1 } },
         { "$limit": 10 }
       ]
     },
     {
-      "label": "mongoToSqlite.test.html — $lookup equality join",
-      "table": "users",
+      "label": "Borrows lookup users by user_id",
+      "table": "borrows",
       "pipeline": [
-        { "$match": { "id": 1 } },
-        { "$lookup": { "from": "orders", "localField": "id", "foreignField": "user_id" } }
+        { "$match": { "status": "borrowed" } },
+        { "$lookup": { "from": "users", "localField": "user_id", "foreignField": "_id" } }
+      ]
+    },
+    {
+      "label": "Borrows lookup books by book_id",
+      "table": "borrows",
+      "pipeline": [
+        { "$match": { "status": "borrowed" } },
+        { "$lookup": { "from": "books", "localField": "book_id", "foreignField": "_id" } }
       ]
     }
   ]
