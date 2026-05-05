@@ -1,0 +1,165 @@
+{
+  "select": [
+    {
+      "label": "Dotted path warning + compound operators",
+      "table": "users",
+      "filter": { "address.city": "Delhi", "age": { "$gte": 18, "$lte": 60 }, "tags": { "$in": ["admin", "mod"] }, "deleted": { "$exists": false } },
+      "projection": {},
+      "sort": {},
+      "limit": null,
+      "skip": null
+    },
+    {
+      "label": "$nor + $not + $regex with metacharacters",
+      "table": "users",
+      "filter": { "$nor": [{ "status": "banned" }, { "role": "guest" }], "email": { "$regex": ".*@gmail\\.com", "$options": "i" }, "score": { "$not": { "$lt": 50 } } },
+      "projection": { "email": 1, "score": 1 },
+      "sort": { "score": -1 },
+      "limit": null,
+      "skip": null
+    },
+    {
+      "label": "$elemMatch + $size + $type (should warn and skip, not crash)",
+      "table": "users",
+      "filter": { "scores": { "$elemMatch": { "$gt": 90 } }, "tags": { "$size": 3 }, "name": { "$type": "string" } },
+      "projection": {},
+      "sort": {},
+      "limit": null,
+      "skip": null
+    }
+  ],
+
+  "insert": [
+    {
+      "label": "Multi-doc with mismatched keys — union columns (checkbox ON)",
+      "table": "users",
+      "inferColumns": true,
+      "docs": [
+        { "id": 1, "name": "Alice", "role": "admin" },
+        { "id": 2, "email": "bob@x.com", "score": 99 },
+        { "id": 3, "name": "Carol", "email": "c@x.com", "score": 42, "role": "user" }
+      ]
+    },
+    {
+      "label": "Multi-doc with mismatched keys — first-doc only (checkbox OFF)",
+      "table": "users",
+      "inferColumns": false,
+      "docs": [
+        { "id": 1, "name": "Alice", "role": "admin" },
+        { "id": 2, "email": "bob@x.com", "score": 99 },
+        { "id": 3, "name": "Carol", "email": "c@x.com", "score": 42, "role": "user" }
+      ]
+    },
+    {
+      "label": "Nested object + array + mixed scalar types (should stringify with warnings)",
+      "table": "products",
+      "inferColumns": true,
+      "docs": [
+        { "id": 10, "meta": { "source": "web", "ver": 2 }, "tags": ["x", "y"], "active": true, "ratio": 0.75 }
+      ]
+    }
+  ],
+
+  "update": [
+    {
+      "label": "$inc + $set together",
+      "table": "posts",
+      "filter": { "_id": 42 },
+      "update": { "$inc": { "views": 1, "likes": -3 }, "$set": { "last_seen": "2025-01-01" } },
+      "allowEmptyFilter": false
+    },
+    {
+      "label": "$mul + $min + $max",
+      "table": "products",
+      "filter": { "tier": "premium" },
+      "update": { "$mul": { "price": 1.1 }, "$min": { "floor_price": 5 }, "$max": { "ceiling_price": 500 } },
+      "allowEmptyFilter": false
+    },
+    {
+      "label": "$rename (should warn, not crash)",
+      "table": "users",
+      "filter": { "_id": 1 },
+      "update": { "$rename": { "oldCol": "newCol" } },
+      "allowEmptyFilter": false
+    },
+    {
+      "label": "Mixed $ and plain keys (should hard-error)",
+      "table": "users",
+      "filter": { "_id": 1 },
+      "update": { "$set": { "a": 1 }, "b": 2 },
+      "allowEmptyFilter": false
+    }
+  ],
+
+  "aggregate": [
+    {
+      "label": "Multiple $lookup + $match after join + $group",
+      "table": "users",
+      "pipeline": [
+        { "$match": { "status": "active" } },
+        { "$lookup": { "from": "orders", "localField": "_id", "foreignField": "user_id", "as": "orders" } },
+        { "$lookup": { "from": "payments", "localField": "_id", "foreignField": "customer_id", "as": "payments" } },
+        { "$match": { "country": "IN" } },
+        { "$group": { "_id": "$region", "total": { "$sum": "$amount" }, "n": { "$sum": 1 } } },
+        { "$sort": { "total": -1 } },
+        { "$limit": 5 }
+      ]
+    },
+    {
+      "label": "$first + $last with pre-sort",
+      "table": "employees",
+      "pipeline": [
+        { "$sort": { "created_at": 1 } },
+        { "$group": {
+            "_id": "$dept",
+            "earliest": { "$first": "$created_at" },
+            "latest": { "$last": "$updated_at" },
+            "top_score": { "$max": "$score" }
+        }}
+      ]
+    },
+    {
+      "label": "$addFields with arithmetic expressions",
+      "table": "sales",
+      "pipeline": [
+        { "$match": { "active": true } },
+        { "$addFields": {
+            "full_name": { "$concat": ["$first_name", " ", "$last_name"] },
+            "discounted": { "$multiply": ["$price", 0.9] },
+            "net": { "$subtract": ["$revenue", "$cost"] }
+        }},
+        { "$sort": { "net": -1 } },
+        { "$limit": 20 }
+      ]
+    },
+    {
+      "label": "$project with $cond and $ifNull",
+      "table": "users",
+      "pipeline": [
+        { "$project": {
+            "name": 1,
+            "score": 1,
+            "label": { "$cond": { "if": "$is_premium", "then": "VIP", "else": "standard" } },
+            "display_email": { "$ifNull": ["$email", "hidden"] }
+        }}
+      ]
+    },
+    {
+      "label": "$unwind (should warn and continue, not error)",
+      "table": "users",
+      "pipeline": [
+        { "$match": { "dept": "eng" } },
+        { "$unwind": "$skills" },
+        { "$group": { "_id": "$skills", "count": { "$sum": 1 } } },
+        { "$sort": { "count": -1 } }
+      ]
+    },
+    {
+      "label": "Unsupported accumulator $push (should hard-error clearly)",
+      "table": "orders",
+      "pipeline": [
+        { "$group": { "_id": "$category", "ids": { "$push": "$_id" } } }
+      ]
+    }
+  ]
+}
