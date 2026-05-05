@@ -33,10 +33,12 @@ const els = {
   deleteAllowEmptyFilter: $("deleteAllowEmptyFilter"),
   aggregatePipeline: $("aggregatePipeline"),
   btnGenerate: $("btnGenerate"),
+  btnRunSql: $("btnRunSql"),
   btnCopy: $("btnCopy"),
   btnDownload: $("btnDownload"),
   message: $("message"),
   sqlOut: $("sqlOut"),
+  queryResult: $("queryResult"),
 };
 
 const sampleButtonContainers = {
@@ -171,6 +173,10 @@ function setMessage(text, kind) {
   els.message.className = "message" + (kind ? ` ${kind}` : "");
 }
 
+function setQueryResult(value) {
+  els.queryResult.textContent = value || "";
+}
+
 function currentOperation() {
   return activeTab;
 }
@@ -225,6 +231,7 @@ function generate() {
     const msg = /** @type {Error} */ (e).message || String(e);
     setMessage(msg, "error");
     els.sqlOut.textContent = "";
+    setQueryResult("");
     return;
   }
 
@@ -233,6 +240,7 @@ function generate() {
   if (result.error) {
     setMessage(result.error, "error");
     els.sqlOut.textContent = "";
+    setQueryResult("");
     return;
   }
 
@@ -242,9 +250,52 @@ function generate() {
       : "OK.";
   setMessage(warnText, result.warnings.length ? "warn" : "ok");
   els.sqlOut.textContent = result.sql;
+  setQueryResult("");
 }
 
 els.btnGenerate.addEventListener("click", generate);
+
+els.btnRunSql?.addEventListener("click", async () => {
+  const sql = (els.sqlOut.textContent || "").trim();
+  if (!sql) {
+    setMessage("Generate SQL first.", "warn");
+    return;
+  }
+
+  setMessage("Running SQL on dummy SQLite DB...", "");
+  setQueryResult("");
+
+  try {
+    const response = await fetch("/api/run-sql", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `Request failed (${response.status})`);
+    }
+
+    if (data.mode === "query") {
+      setQueryResult(JSON.stringify(data.rows, null, 2));
+      setMessage(`Query completed. ${data.rowCount} row(s) returned.`, "ok");
+      return;
+    }
+
+    const runPayload = {
+      changes: data.changes,
+      lastInsertRowid: data.lastInsertRowid,
+    };
+    setQueryResult(JSON.stringify(runPayload, null, 2));
+    setMessage(`Statement executed. ${data.changes} row(s) changed.`, "ok");
+  } catch (error) {
+    setMessage(
+      `SQL execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+    setQueryResult("");
+  }
+});
 
 els.btnCopy?.addEventListener("click", async () => {
   const text = els.sqlOut.textContent || "";

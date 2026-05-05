@@ -281,6 +281,15 @@ textarea {
   color: #c4e1ff;
 }
 
+.result-title {
+  margin-top: 1rem !important;
+}
+
+.result-out {
+  min-height: 8rem;
+  color: #d7f5ff;
+}
+
 .limitations ul {
   margin: 0;
   padding-left: 1.2rem;
